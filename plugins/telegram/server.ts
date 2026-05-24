@@ -21,7 +21,7 @@ import { z } from 'zod'
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, unlinkSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 
@@ -118,6 +118,157 @@ function stopTypingLoop(chat_id: string) {
     typingLoops.delete(chat_id)
   }
 }
+
+// Watchdog: a single self-editing status bubble per turn, surfaced after
+// 60s of work so the user can see the agent hasn't stalled. Hooks
+// (UserPromptSubmit / PreToolUse / Stop) write per-chat state files into
+// WATCHDOG_DIR; this poll loop spawns, edits, and finalizes the bubble.
+// DM-only — group bubbles would be noise to everyone except the operator.
+const WATCHDOG_DIR = join(STATE_DIR, 'watchdog')
+mkdirSync(WATCHDOG_DIR, { recursive: true, mode: 0o700 })
+const WATCHDOG_THRESHOLD_MS = 60_000
+const WATCHDOG_EDIT_CADENCE_MS = 10_000
+const WATCHDOG_POLL_MS = 5_000
+
+type WatchdogState = {
+  started_at: number
+  session_id: string
+  last_tool: string | null
+  last_tool_at: number | null
+  bubble_message_id: number | null
+  ended_at: number | null
+}
+
+type BubbleEntry = {
+  messageId: number
+  startedAt: number
+  lastEditAt: number
+  lastRenderedText: string
+}
+const bubbles = new Map<string, BubbleEntry>()
+
+function fmtElapsed(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000))
+  if (sec < 60) return `${sec}s`
+  const min = Math.floor(sec / 60)
+  const rem = sec % 60
+  return `${min}m${String(rem).padStart(2, '0')}s`
+}
+
+function renderBubbleText(state: WatchdogState, now: number): string {
+  const elapsed = fmtElapsed(now - state.started_at)
+  const tool = state.last_tool ?? '—'
+  return `⏳ working… ${elapsed} • last: ${tool}`
+}
+
+function renderFinalText(state: WatchdogState, endedAt: number): string {
+  return `✓ done in ${fmtElapsed(endedAt - state.started_at)}`
+}
+
+function readWatchdogState(path: string): WatchdogState | null {
+  try { return JSON.parse(readFileSync(path, 'utf8')) as WatchdogState } catch { return null }
+}
+
+function writeWatchdogState(path: string, state: WatchdogState): void {
+  try { writeFileSync(path, JSON.stringify(state)) } catch {}
+}
+
+// Rehydrate on boot: if the plugin restarted while a turn was live, the
+// state file still holds the bubble's message_id — reattach so we keep
+// editing the same bubble instead of orphaning it. Otherwise mark any
+// orphaned (no bubble, no ended_at) state as ended so a stale turn from a
+// prior session doesn't spawn a fresh bubble retroactively.
+try {
+  const now = Date.now()
+  for (const f of readdirSync(WATCHDOG_DIR)) {
+    if (!f.endsWith('.json')) continue
+    const chat_id = f.slice(0, -'.json'.length)
+    const path = join(WATCHDOG_DIR, f)
+    const s = readWatchdogState(path)
+    if (!s) continue
+    if (s.bubble_message_id != null && s.bubble_message_id > 0 && s.ended_at == null) {
+      bubbles.set(chat_id, {
+        messageId: s.bubble_message_id,
+        startedAt: s.started_at,
+        lastEditAt: 0,
+        lastRenderedText: '',
+      })
+    } else if (s.ended_at == null) {
+      s.ended_at = now
+      writeWatchdogState(path, s)
+    }
+  }
+} catch {}
+
+let watchdogTickRunning = false
+async function watchdogTick(): Promise<void> {
+  if (watchdogTickRunning) return
+  watchdogTickRunning = true
+  try {
+    const now = Date.now()
+    let files: string[]
+    try { files = readdirSync(WATCHDOG_DIR) } catch { return }
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue
+      const chat_id = f.slice(0, -'.json'.length)
+      // DM only — telegram group/supergroup chat_ids are negative.
+      if (!/^\d+$/.test(chat_id)) continue
+      const path = join(WATCHDOG_DIR, f)
+      const state = readWatchdogState(path)
+      if (!state) continue
+
+      const entry = bubbles.get(chat_id)
+
+      if (state.ended_at != null) {
+        if (entry) {
+          const text = renderFinalText(state, state.ended_at)
+          try { await bot.api.editMessageText(chat_id, entry.messageId, text) } catch {}
+          bubbles.delete(chat_id)
+        }
+        try { unlinkSync(path) } catch {}
+        continue
+      }
+
+      const elapsed = now - state.started_at
+      if (!entry) {
+        if (elapsed < WATCHDOG_THRESHOLD_MS) continue
+        if (state.bubble_message_id === -1) continue // previous post failed; don't retry
+        try {
+          const text = renderBubbleText(state, now)
+          const sent = await bot.api.sendMessage(chat_id, text)
+          bubbles.set(chat_id, {
+            messageId: sent.message_id,
+            startedAt: state.started_at,
+            lastEditAt: now,
+            lastRenderedText: text,
+          })
+          state.bubble_message_id = sent.message_id
+          writeWatchdogState(path, state)
+        } catch (err) {
+          process.stderr.write(`watchdog: bubble post failed for ${chat_id}: ${err}\n`)
+          state.bubble_message_id = -1
+          writeWatchdogState(path, state)
+        }
+      } else {
+        if (now - entry.lastEditAt < WATCHDOG_EDIT_CADENCE_MS) continue
+        const text = renderBubbleText(state, now)
+        entry.lastEditAt = now
+        if (text === entry.lastRenderedText) continue
+        try {
+          await bot.api.editMessageText(chat_id, entry.messageId, text)
+          entry.lastRenderedText = text
+        } catch {
+          // "message is not modified" or transient — leave lastRenderedText
+          // unset to retry on next tick.
+        }
+      }
+    }
+  } finally {
+    watchdogTickRunning = false
+  }
+}
+
+if (!STATIC) setInterval(() => { void watchdogTick() }, WATCHDOG_POLL_MS).unref()
 
 type PendingEntry = {
   senderId: string
