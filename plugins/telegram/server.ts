@@ -25,6 +25,13 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 
+// Plugin version is sourced from the colocated package.json so /status
+// can surface it without a build-time stamp. Wrapped to never throw.
+let PLUGIN_VERSION = '?'
+try {
+  PLUGIN_VERSION = JSON.parse(readFileSync(join(import.meta.dir, 'package.json'), 'utf8')).version ?? '?'
+} catch {}
+
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const APPROVED_DIR = join(STATE_DIR, 'approved')
@@ -87,6 +94,30 @@ const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 const bot = new Bot(TOKEN)
 let botUsername = ''
+
+// Telegram clears the "typing…" indicator ~5s after each sendChatAction.
+// To keep it visible for long agent turns we re-send every 4s per chat
+// until the next outbound reply (or a 5min ceiling, in case the agent
+// crashes and never replies, so we don't loop forever).
+const TYPING_INTERVAL_MS = 4_000
+const TYPING_CEILING_MS = 5 * 60 * 1000
+const typingLoops = new Map<string, ReturnType<typeof setInterval>>()
+function startTypingLoop(chat_id: string) {
+  stopTypingLoop(chat_id)
+  void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  const handle = setInterval(() => {
+    void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  }, TYPING_INTERVAL_MS)
+  typingLoops.set(chat_id, handle)
+  setTimeout(() => stopTypingLoop(chat_id), TYPING_CEILING_MS)
+}
+function stopTypingLoop(chat_id: string) {
+  const handle = typingLoops.get(chat_id)
+  if (handle) {
+    clearInterval(handle)
+    typingLoops.delete(chat_id)
+  }
+}
 
 type PendingEntry = {
   senderId: string
@@ -531,6 +562,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
 
         assertAllowedChat(chat_id)
+        stopTypingLoop(chat_id)
 
         for (const f of files) {
           assertSendable(f)
@@ -812,6 +844,7 @@ bot.command('status', async ctx => {
     lines.push(`uptime: ${formatDuration(now - session.startedAt)}`)
     lines.push(`last activity: ${formatDuration(now - session.updatedAt)} ago`)
     lines.push(`claude: v${session.version}`)
+    lines.push(`plugin: v${PLUGIN_VERSION}`)
     lines.push(`workdir: ${session.cwd}`)
   }
   await ctx.reply(lines.join('\n'))
@@ -1115,8 +1148,8 @@ async function handleInbound(
     return
   }
 
-  // Typing indicator — signals "processing" until we reply (or ~5s elapses).
-  void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  // Typing indicator — re-sent every 4s until the next outbound reply.
+  startTypingLoop(chat_id)
 
   // Ack reaction — lets the user know we're processing. Fire-and-forget.
   // Telegram only accepts a fixed emoji whitelist — if the user configures
