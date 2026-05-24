@@ -24,7 +24,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
-import { COMMAND_REGISTRY, renderHelpBody, botFatherCommands } from './commands'
+import { COMMAND_REGISTRY, renderHelpBody, botFatherCommands, MODEL_ALIASES, EFFORT_LEVELS } from './commands'
 
 // Plugin version is sourced from the colocated package.json so /status
 // can surface it without a build-time stamp. Wrapped to never throw.
@@ -822,6 +822,19 @@ function readClaudeModelAndEffort(pid: number): { model?: string; effort?: strin
   return { model, effort }
 }
 
+// In-place edit of ~/.claude/settings.json, used by /model and /effort.
+// Parse → merge → write back atomically. Preserves every other key. Throws
+// on missing/corrupt file so the caller can surface the error to the user.
+function patchSettings(patch: Record<string, unknown>): void {
+  const path = join(homedir(), '.claude', 'settings.json')
+  const raw = readFileSync(path, 'utf8')
+  const obj = JSON.parse(raw) as Record<string, unknown>
+  Object.assign(obj, patch)
+  const tmp = path + '.tmp'
+  writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, path)
+}
+
 function formatDuration(ms: number): string {
   const sec = Math.floor(ms / 1000)
   if (sec < 60) return `${sec}s`
@@ -933,6 +946,64 @@ const commandHandlers: Record<string, CommandHandler> = {
       await ctx.reply(`Killed claude (pid=${session.pid}). systemd will respawn within ~2s.`)
     } catch (err) {
       await ctx.reply(`Failed to kill: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  },
+
+  // /model — show or switch the model field in ~/.claude/settings.json. With
+  // no arg we just echo the current value. With an alias we rewrite the file
+  // and SIGTERM claude so systemd respawns it on the new model. Claude Code
+  // accepts both short aliases ("opus") and full IDs ("claude-opus-4-7"), so
+  // we write the short alias the user typed — easier to read in settings.json.
+  model: async ctx => {
+    const arg = (ctx.match ?? '').trim()
+    const session = findActiveSession()
+
+    if (!arg) {
+      const cur = session ? readClaudeModelAndEffort(session.pid).model : undefined
+      const list = Object.keys(MODEL_ALIASES).join(' | ')
+      await ctx.reply(`Current model: ${cur ?? '(unset — using default)'}\nSwitch with: /model ${list}`)
+      return
+    }
+    if (!(arg in MODEL_ALIASES)) {
+      await ctx.reply(`Unknown model "${arg}". Try: /model ${Object.keys(MODEL_ALIASES).join(' | ')}`)
+      return
+    }
+    try {
+      patchSettings({ model: arg })
+    } catch (err) {
+      await ctx.reply(`Failed to update settings.json: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+    await ctx.reply(`Switched to ${arg}. Restarting in ~1s; the session will resume.`)
+    if (session) {
+      try { process.kill(session.pid, 'SIGTERM') } catch {}
+    }
+  },
+
+  // /effort — same shape as /model, different field. Claude Code stores the
+  // current reasoning effort under `effortLevel` in settings.json.
+  effort: async ctx => {
+    const arg = (ctx.match ?? '').trim()
+    const session = findActiveSession()
+
+    if (!arg) {
+      const cur = session ? readClaudeModelAndEffort(session.pid).effort : undefined
+      await ctx.reply(`Current effort: ${cur ?? '(unset — using default)'}\nSwitch with: /effort ${EFFORT_LEVELS.join(' | ')}`)
+      return
+    }
+    if (!(EFFORT_LEVELS as readonly string[]).includes(arg)) {
+      await ctx.reply(`Unknown effort "${arg}". Try: /effort ${EFFORT_LEVELS.join(' | ')}`)
+      return
+    }
+    try {
+      patchSettings({ effortLevel: arg })
+    } catch (err) {
+      await ctx.reply(`Failed to update settings.json: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+    await ctx.reply(`Effort set to ${arg}. Restarting in ~1s; the session will resume.`)
+    if (session) {
+      try { process.kill(session.pid, 'SIGTERM') } catch {}
     }
   },
 

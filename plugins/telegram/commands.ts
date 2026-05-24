@@ -53,7 +53,28 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     description: 'List sibling agents on this host',
     scope: 'paired',
   },
+  {
+    name: 'model',
+    description: 'Show or switch model (opus | sonnet | haiku)',
+    scope: 'paired',
+  },
+  {
+    name: 'effort',
+    description: 'Show or switch reasoning effort (low | medium | high | xhigh | max)',
+    scope: 'paired',
+  },
 ]
+
+/** Short model alias → full Claude Code model ID. Add new tiers here. */
+export const MODEL_ALIASES: Record<string, string> = {
+  opus: 'claude-opus-4-7',
+  sonnet: 'claude-sonnet-4-6',
+  haiku: 'claude-haiku-4-5-20251001',
+}
+
+/** Effort levels accepted by Claude Code's settings.json. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export type EffortLevel = (typeof EFFORT_LEVELS)[number]
 
 /** Render the /help body from the registry. Hidden commands are omitted. */
 export function renderHelpBody(registry: CommandDef[] = COMMAND_REGISTRY): string {

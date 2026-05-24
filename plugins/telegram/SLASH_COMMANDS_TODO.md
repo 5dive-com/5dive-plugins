@@ -111,7 +111,7 @@ These require touching the running agent. Two patterns:
 - **In-session inject** (cd, goal): send the slash command into the
   running Claude via `5dive agent send self ...` (or tmux directly).
 
-### T6 — `/model [name]`
+### T6 — `/model [name]` ✅ (shipped v0.4.0)
 
 Switch model. With no arg: show current.
 
@@ -122,7 +122,7 @@ Switch model. With no arg: show current.
   the CLAUDE.md pattern. Warn user "restarting in ~1s, session resumes."
 - Scope: admin DM only
 
-### T7 — `/effort [level]`
+### T7 — `/effort [level]` ✅ (shipped v0.4.0)
 
 Switch reasoning effort. Levels: **`low`, `medium`, `high`, `xhigh`, `max`**.
 (User clarified: xhigh and max exist beyond low/med/high.)
