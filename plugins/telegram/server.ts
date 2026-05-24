@@ -24,6 +24,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
+import { COMMAND_REGISTRY, renderHelpBody, botFatherCommands } from './commands'
 
 // Plugin version is sourced from the colocated package.json so /status
 // can surface it without a build-time stamp. Wrapped to never throw.
@@ -710,38 +711,6 @@ setInterval(() => {
   if (orphaned) shutdown()
 }, 5000).unref()
 
-// Commands are DM-only. Responding in groups would: (1) leak pairing codes via
-// /status to other group members, (2) confirm bot presence in non-allowlisted
-// groups, (3) spam channels the operator never approved. Silent drop matches
-// the gate's behavior for unrecognized groups.
-
-bot.command('start', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  await ctx.reply(
-    `This bot bridges Telegram to a Claude Code session.\n\n` +
-    `To pair:\n` +
-    `1. DM me anything — you'll get a 6-char code\n` +
-    `2. In Claude Code: /telegram:access pair <code>\n\n` +
-    `After that, DMs here reach that session.`
-  )
-})
-
-bot.command('help', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  await ctx.reply(
-    `This bot bridges your Telegram chat to a Claude Code session — ` +
-    `freeform messages and photos are forwarded; replies and reactions come back.\n\n` +
-    `Commands:\n` +
-    `/help — this message\n` +
-    `/status — pairing state + session health (uptime, model, last activity)\n` +
-    `/stop — interrupt the agent's current task (Ctrl-C)\n` +
-    `/restart — kill claude and let systemd respawn it\n` +
-    `/agents — list sibling agents on this host\n` +
-    `/start — pairing instructions (only useful before you're paired)\n\n` +
-    `Forwarded messages go straight to the agent — no slash prefix needed.`
-  )
-})
-
 // Find the most-recently-updated claude session file. Each running claude
 // process writes ~/.claude/sessions/<pid>.json with status/uptime metadata.
 // Returns null if no session file is readable (claude not started yet).
@@ -812,124 +781,153 @@ function formatDuration(ms: number): string {
   return `${day}d ${hr % 24}h`
 }
 
-bot.command('status', async ctx => {
-  const gated = dmCommandGate(ctx)
-  if (!gated) return
-  const { access, senderId } = gated
-
-  // Unpaired senders get the upstream pairing flow — no health detail leaked.
-  if (!access.allowFrom.includes(senderId)) {
-    for (const [code, p] of Object.entries(access.pending)) {
-      if (p.senderId === senderId) {
-        await ctx.reply(
-          `Pending pairing — run in Claude Code:\n\n/telegram:access pair ${code}`
-        )
-        return
-      }
-    }
-    await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
-    return
-  }
-
-  const name = ctx.from!.username ? `@${ctx.from!.username}` : senderId
-  const session = findActiveSession()
-  const lines = [`Paired as ${name}.`, '']
-  if (!session) {
-    lines.push(`⚠️  no active claude session detected`)
-  } else {
-    const now = Date.now()
-    const { model, effort } = readClaudeModelAndEffort(session.pid)
-    lines.push(`status: ${session.status}`)
-    if (model) lines.push(`model: ${model}${effort ? ` · ${effort}` : ''}`)
-    lines.push(`uptime: ${formatDuration(now - session.startedAt)}`)
-    lines.push(`last activity: ${formatDuration(now - session.updatedAt)} ago`)
-    lines.push(`claude: v${session.version}`)
-    lines.push(`plugin: v${PLUGIN_VERSION}`)
-    lines.push(`workdir: ${session.cwd}`)
-  }
-  await ctx.reply(lines.join('\n'))
-})
-
 const execFileP = promisify(execFile)
 
-// /stop — interrupt the agent's current task. Sends C-c to the tmux pane
-// the running claude session lives in. Same effect as the user pressing
-// Esc / Ctrl-C in the local terminal. Paired senders only.
-bot.command('stop', async ctx => {
-  const gated = dmCommandGate(ctx)
-  if (!gated) return
-  if (!gated.access.allowFrom.includes(gated.senderId)) {
-    await ctx.reply(`Not paired — /stop requires a paired session.`)
-    return
-  }
-  const user = process.env.USER ?? process.env.LOGNAME ?? ''
-  const target = user.startsWith('agent-') ? user : ''
-  if (!target) {
-    await ctx.reply(`Can't determine tmux session name (USER=${user || '?'}).`)
-    return
-  }
-  try {
-    await execFileP('tmux', ['send-keys', '-t', `${target}:0`, 'C-c'])
-    await ctx.reply(`Sent Ctrl-C to ${target}.`)
-  } catch (err) {
-    await ctx.reply(`Failed to send Ctrl-C: ${err instanceof Error ? err.message : String(err)}`)
-  }
-})
+// Commands are DM-only. Responding in groups would: (1) leak pairing codes via
+// /status to other group members, (2) confirm bot presence in non-allowlisted
+// groups, (3) spam channels the operator never approved. Silent drop matches
+// the gate's behavior for unrecognized groups.
+//
+// Handlers below assume the dispatcher already enforced scope:
+//   - 'allowed' scope → handler receives a non-null gate; it may still branch
+//     on access.allowFrom for paired-vs-unpaired UX (see /status).
+//   - 'paired'  scope → dispatcher rejected non-paired senders with a standard
+//     message before invoking the handler. Handler can assume paired.
+//
+// Metadata (name, description, scope, /help text, BotFather menu) lives in
+// ./commands.ts — keep handler keys in sync with COMMAND_REGISTRY entries.
+type CommandHandler = (
+  ctx: Context,
+  gate: { access: Access; senderId: string },
+) => Promise<void>
 
-// /restart — kill the claude process; systemd's respawn loop brings it back
-// within ~2s. Useful when claude is stuck in an error state. Paired only.
-bot.command('restart', async ctx => {
-  const gated = dmCommandGate(ctx)
-  if (!gated) return
-  if (!gated.access.allowFrom.includes(gated.senderId)) {
-    await ctx.reply(`Not paired — /restart requires a paired session.`)
-    return
-  }
-  const session = findActiveSession()
-  if (!session) {
-    await ctx.reply(`No active claude session to restart.`)
-    return
-  }
-  try {
-    process.kill(session.pid, 'SIGTERM')
-    await ctx.reply(`Killed claude (pid=${session.pid}). systemd will respawn within ~2s.`)
-  } catch (err) {
-    await ctx.reply(`Failed to kill: ${err instanceof Error ? err.message : String(err)}`)
-  }
-})
+const commandHandlers: Record<string, CommandHandler> = {
+  start: async ctx => {
+    await ctx.reply(
+      `This bot bridges Telegram to a Claude Code session.\n\n` +
+      `To pair:\n` +
+      `1. DM me anything — you'll get a 6-char code\n` +
+      `2. In Claude Code: /telegram:access pair <code>\n\n` +
+      `After that, DMs here reach that session.`
+    )
+  },
 
-// /agents — list sibling agents managed by 5dive on the same host. Requires
-// `sudo 5dive` to read the agent registry. Paired senders only.
-bot.command('agents', async ctx => {
-  const gated = dmCommandGate(ctx)
-  if (!gated) return
-  if (!gated.access.allowFrom.includes(gated.senderId)) {
-    await ctx.reply(`Not paired — /agents requires a paired session.`)
-    return
-  }
-  try {
-    const { stdout } = await execFileP('sudo', ['-n', '5dive', 'agent', 'list', '--json'])
-    const j = JSON.parse(stdout)
-    if (!j.ok || !Array.isArray(j.data)) {
-      await ctx.reply(`5dive returned unexpected output.`)
+  help: async ctx => {
+    await ctx.reply(renderHelpBody(COMMAND_REGISTRY))
+  },
+
+  status: async (ctx, { access, senderId }) => {
+    // Unpaired senders get the upstream pairing flow — no health detail leaked.
+    if (!access.allowFrom.includes(senderId)) {
+      for (const [code, p] of Object.entries(access.pending)) {
+        if (p.senderId === senderId) {
+          await ctx.reply(
+            `Pending pairing — run in Claude Code:\n\n/telegram:access pair ${code}`
+          )
+          return
+        }
+      }
+      await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
       return
     }
-    if (j.data.length === 0) {
-      await ctx.reply(`No agents configured.`)
+
+    const name = ctx.from!.username ? `@${ctx.from!.username}` : senderId
+    const session = findActiveSession()
+    const lines = [`Paired as ${name}.`, '']
+    if (!session) {
+      lines.push(`⚠️  no active claude session detected`)
+    } else {
+      const now = Date.now()
+      const { model, effort } = readClaudeModelAndEffort(session.pid)
+      lines.push(`status: ${session.status}`)
+      if (model) lines.push(`model: ${model}${effort ? ` · ${effort}` : ''}`)
+      lines.push(`uptime: ${formatDuration(now - session.startedAt)}`)
+      lines.push(`last activity: ${formatDuration(now - session.updatedAt)} ago`)
+      lines.push(`claude: v${session.version}`)
+      lines.push(`plugin: v${PLUGIN_VERSION}`)
+      lines.push(`workdir: ${session.cwd}`)
+    }
+    await ctx.reply(lines.join('\n'))
+  },
+
+  // /stop — interrupt the agent's current task. Sends C-c to the tmux pane
+  // the running claude session lives in. Same effect as the user pressing
+  // Esc / Ctrl-C in the local terminal.
+  stop: async ctx => {
+    const user = process.env.USER ?? process.env.LOGNAME ?? ''
+    const target = user.startsWith('agent-') ? user : ''
+    if (!target) {
+      await ctx.reply(`Can't determine tmux session name (USER=${user || '?'}).`)
       return
     }
-    const me = (process.env.USER ?? '').replace(/^agent-/, '')
-    const lines = j.data.map((a: any) => {
-      const marker = a.name === me ? ' ← you' : ''
-      const ch = a.channels && a.channels !== 'none' ? ` [${a.channels}]` : ''
-      const profile = a.profile && a.profile !== '-' ? ` (${a.profile})` : ''
-      return `• ${a.name} · ${a.type}${ch}${profile} · ${a.active}${marker}`
-    })
-    await ctx.reply(`Agents on this host:\n\n${lines.join('\n')}`)
-  } catch (err) {
-    await ctx.reply(`Failed to list agents: ${err instanceof Error ? err.message : String(err)}`)
+    try {
+      await execFileP('tmux', ['send-keys', '-t', `${target}:0`, 'C-c'])
+      await ctx.reply(`Sent Ctrl-C to ${target}.`)
+    } catch (err) {
+      await ctx.reply(`Failed to send Ctrl-C: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  },
+
+  // /restart — kill the claude process; systemd's respawn loop brings it back
+  // within ~2s. Useful when claude is stuck in an error state.
+  restart: async ctx => {
+    const session = findActiveSession()
+    if (!session) {
+      await ctx.reply(`No active claude session to restart.`)
+      return
+    }
+    try {
+      process.kill(session.pid, 'SIGTERM')
+      await ctx.reply(`Killed claude (pid=${session.pid}). systemd will respawn within ~2s.`)
+    } catch (err) {
+      await ctx.reply(`Failed to kill: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  },
+
+  // /agents — list sibling agents managed by 5dive on the same host. Requires
+  // `sudo 5dive` to read the agent registry.
+  agents: async ctx => {
+    try {
+      const { stdout } = await execFileP('sudo', ['-n', '5dive', 'agent', 'list', '--json'])
+      const j = JSON.parse(stdout)
+      if (!j.ok || !Array.isArray(j.data)) {
+        await ctx.reply(`5dive returned unexpected output.`)
+        return
+      }
+      if (j.data.length === 0) {
+        await ctx.reply(`No agents configured.`)
+        return
+      }
+      const me = (process.env.USER ?? '').replace(/^agent-/, '')
+      const lines = j.data.map((a: any) => {
+        const marker = a.name === me ? ' ← you' : ''
+        const ch = a.channels && a.channels !== 'none' ? ` [${a.channels}]` : ''
+        const profile = a.profile && a.profile !== '-' ? ` (${a.profile})` : ''
+        return `• ${a.name} · ${a.type}${ch}${profile} · ${a.active}${marker}`
+      })
+      await ctx.reply(`Agents on this host:\n\n${lines.join('\n')}`)
+    } catch (err) {
+      await ctx.reply(`Failed to list agents: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  },
+}
+
+for (const def of COMMAND_REGISTRY) {
+  const handler = commandHandlers[def.name]
+  if (!handler) {
+    process.stderr.write(`telegram channel: no handler for /${def.name} — skipping registration\n`)
+    continue
   }
-})
+  bot.command(def.name, async ctx => {
+    const gate = dmCommandGate(ctx)
+    if (!gate) return
+    if (def.scope === 'paired' && !gate.access.allowFrom.includes(gate.senderId)) {
+      await ctx.reply(`Not paired — /${def.name} requires a paired session.`)
+      return
+    }
+    await handler(ctx, gate)
+  })
+}
 
 // Inline-button handler for permission requests. Callback data is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
@@ -1211,14 +1209,7 @@ void (async () => {
           botUsername = info.username
           process.stderr.write(`telegram channel: polling as @${info.username}\n`)
           void bot.api.setMyCommands(
-            [
-              { command: 'help', description: 'List commands' },
-              { command: 'status', description: 'Pairing + session health' },
-              { command: 'stop', description: 'Interrupt current task (Ctrl-C)' },
-              { command: 'restart', description: 'Kill claude; systemd respawns' },
-              { command: 'agents', description: 'List sibling agents' },
-              { command: 'start', description: 'Pairing instructions' },
-            ],
+            botFatherCommands(),
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
         },
