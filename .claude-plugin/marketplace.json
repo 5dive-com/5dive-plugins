@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "5dive-plugins",
+  "description": "Claude Code plugins maintained by 5dive — Telegram bridge and related agent-channel integrations.",
+  "owner": {
+    "name": "5dive",
+    "email": "support@5dive.com"
+  },
+  "plugins": [
+    {
+      "name": "telegram",
+      "description": "Telegram messaging bridge for Claude Code with access control, multi-agent routing, and bundled lifecycle hooks. Fork of Anthropic's official telegram plugin extended with 5dive auto-relay, stop-reply checks, and ask-user-question routing.",
+      "category": "productivity",
+      "source": "./plugins/telegram",
+      "homepage": "https://github.com/5dive-com/5dive-plugins/tree/main/plugins/telegram"
+    }
+  ]
+}

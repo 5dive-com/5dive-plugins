@@ -1,0 +1,8 @@
+5dive-plugins
+Copyright 2026 5dive
+
+This product includes software developed by Anthropic, PBC.
+The `plugins/telegram/` subtree is a fork of the `telegram` plugin from
+https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram
+licensed under the Apache License, Version 2.0. See plugins/telegram/LICENSE
+for the original license text.
