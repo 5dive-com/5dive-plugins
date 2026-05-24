@@ -431,9 +431,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
-      '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+      'Inbound arrives as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. Pass chat_id back to reply. If the tag has image_path, Read that path (a photo). If attachment_file_id, call download_attachment then Read the returned path. Set reply_to only when threading under an earlier message; omit it for normal latest-message replies.',
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
       '',
@@ -476,6 +474,13 @@ mcp.setNotificationHandler(
   },
 )
 
+// Identical formatting blurb for both reply and edit_message — declared once
+// to keep the per-session token cost down (this string ships in every paired
+// session via the MCP tool schema).
+const FORMAT_DESC =
+  "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). " +
+  "Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed)."
+
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -499,7 +504,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           format: {
             type: 'string',
             enum: ['text', 'markdownv2'],
-            description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+            description: FORMAT_DESC,
           },
         },
         required: ['chat_id', 'text'],
@@ -541,7 +546,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           format: {
             type: 'string',
             enum: ['text', 'markdownv2'],
-            description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+            description: FORMAT_DESC,
           },
         },
         required: ['chat_id', 'message_id', 'text'],
