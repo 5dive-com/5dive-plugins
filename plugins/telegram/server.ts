@@ -850,40 +850,53 @@ function effortKeyboard(): InlineKeyboard {
   return kb
 }
 
-// Shared apply path for the text and callback flows. Returns the
-// status string and whether a restart was scheduled — the callback
-// handler edits the originating message with the status text and removes
-// the keyboard so the same button can't be tapped twice.
-type ApplyResult = { text: string; restart: boolean }
+// Shared apply path for the text and callback flows. Edits settings.json
+// and returns the status string + a deferred-restart fn the caller invokes
+// AFTER it finishes its outbound Telegram I/O. Triggering SIGTERM inline
+// raced the bot's pending sendMessage/editMessageText: server.ts shuts
+// down with a 2s grace, but the in-flight HTTP request to Telegram's API
+// didn't reliably land before the process exited, so the user saw the
+// original message with the keyboard still attached — looked like
+// nothing happened. Now the caller awaits the reply/edit first, then
+// fires restart(), which schedules the SIGTERM on a short timer.
+type ApplyResult = { text: string; restart?: () => void }
 function applyModel(alias: string): ApplyResult {
   if (!(alias in MODEL_ALIASES)) {
-    return { text: `Unknown model "${alias}".`, restart: false }
+    return { text: `Unknown model "${alias}".` }
   }
   try {
     patchSettings({ model: alias })
   } catch (err) {
-    return { text: `Failed to update settings.json: ${err instanceof Error ? err.message : String(err)}`, restart: false }
+    return { text: `Failed to update settings.json: ${err instanceof Error ? err.message : String(err)}` }
   }
-  const session = findActiveSession()
-  if (session) {
-    try { process.kill(session.pid, 'SIGTERM') } catch {}
+  return {
+    text: `✅ Model → ${alias}\n\n⚠️  Claude is restarting in ~1s — the session will resume on the new model. You may notice a short pause before the next reply.`,
+    restart: scheduleClaudeRestart,
   }
-  return { text: `Switched to ${alias}. Restarting in ~1s; the session will resume.`, restart: true }
 }
 function applyEffort(level: string): ApplyResult {
   if (!(EFFORT_LEVELS as readonly string[]).includes(level)) {
-    return { text: `Unknown effort "${level}".`, restart: false }
+    return { text: `Unknown effort "${level}".` }
   }
   try {
     patchSettings({ effortLevel: level })
   } catch (err) {
-    return { text: `Failed to update settings.json: ${err instanceof Error ? err.message : String(err)}`, restart: false }
+    return { text: `Failed to update settings.json: ${err instanceof Error ? err.message : String(err)}` }
   }
+  return {
+    text: `✅ Effort → ${level}\n\n⚠️  Claude is restarting in ~1s — the session will resume with the new effort level. You may notice a short pause before the next reply.`,
+    restart: scheduleClaudeRestart,
+  }
+}
+// Defer the kill by 500ms so any awaited reply/edit ahead of it lands at
+// Telegram before server.ts shuts down (server.ts has a 2s grace, but the
+// in-flight outbound HTTP request needs to finish before bot.stop fires).
+function scheduleClaudeRestart(): void {
   const session = findActiveSession()
-  if (session) {
+  if (!session) return
+  setTimeout(() => {
     try { process.kill(session.pid, 'SIGTERM') } catch {}
-  }
-  return { text: `Effort set to ${level}. Restarting in ~1s; the session will resume.`, restart: true }
+  }, 500).unref()
 }
 
 function formatDuration(ms: number): string {
@@ -1022,6 +1035,7 @@ const commandHandlers: Record<string, CommandHandler> = {
     }
     const r = applyModel(arg)
     await ctx.reply(r.text)
+    r.restart?.()
   },
 
   // /effort — same shape as /model, different field. Claude Code stores the
@@ -1042,6 +1056,7 @@ const commandHandlers: Record<string, CommandHandler> = {
     }
     const r = applyEffort(arg)
     await ctx.reply(r.text)
+    r.restart?.()
   },
 
   // /agents — list sibling agents managed by 5dive on the same host. Requires
@@ -1106,11 +1121,14 @@ bot.on('callback_query:data', async ctx => {
   const modelM = /^model:([a-z0-9-]+)$/.exec(data)
   if (modelM) {
     const r = applyModel(modelM[1]!)
+    // answerCallbackQuery dismisses the spinner Telegram shows after a tap;
+    // its text appears as a transient toast above the message. editMessageText
+    // replaces the original message body and strips the keyboard so the
+    // same option can't be tapped twice. We await both BEFORE scheduling
+    // the SIGTERM so the user actually sees the confirmation.
     await ctx.answerCallbackQuery({ text: r.restart ? 'Switching…' : 'Failed' }).catch(() => {})
-    // Strip the keyboard so the same option can't be tapped twice, and
-    // surface the outcome inline. editMessageText errors when the new text
-    // equals the old; swallow so a no-op edit doesn't bubble.
     await ctx.editMessageText(r.text).catch(() => {})
+    r.restart?.()
     return
   }
   const effortM = /^effort:([a-z]+)$/.exec(data)
@@ -1118,6 +1136,7 @@ bot.on('callback_query:data', async ctx => {
     const r = applyEffort(effortM[1]!)
     await ctx.answerCallbackQuery({ text: r.restart ? 'Switching…' : 'Failed' }).catch(() => {})
     await ctx.editMessageText(r.text).catch(() => {})
+    r.restart?.()
     return
   }
 
