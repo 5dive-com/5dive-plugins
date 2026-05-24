@@ -37,6 +37,7 @@ const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', '
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const APPROVED_DIR = join(STATE_DIR, 'approved')
 const ENV_FILE = join(STATE_DIR, '.env')
+const SILENCE_FILE = join(STATE_DIR, 'silence.json')
 
 // Load ~/.claude/channels/telegram/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — this is where the token lives.
@@ -239,6 +240,50 @@ function saveAccess(a: Access): void {
   const tmp = ACCESS_FILE + '.tmp'
   writeFileSync(tmp, JSON.stringify(a, null, 2) + '\n', { mode: 0o600 })
   renameSync(tmp, ACCESS_FILE)
+}
+
+// Silence-watchdog state shared with hooks/silence-watchdog.sh. Both sides
+// merge-and-write — the hook bumps toolCallsSinceReply on every tool call;
+// this side resets it on reply/edit_message and stamps lastInboundAt on
+// delivery. Atomic via tmp+rename; the brief read-modify-write window with
+// the hook is acceptable because the file is a heuristic, not source of
+// truth. Wrapped in try/catch so a disk hiccup never blocks a Telegram send.
+type SilenceState = {
+  lastInboundAt: number
+  lastReplyAt: number
+  lastReminderAt: number
+  toolCallsSinceReply: number
+}
+function readSilence(): SilenceState {
+  try {
+    const raw = readFileSync(SILENCE_FILE, 'utf8')
+    const j = JSON.parse(raw) as Partial<SilenceState>
+    return {
+      lastInboundAt: j.lastInboundAt ?? 0,
+      lastReplyAt: j.lastReplyAt ?? 0,
+      lastReminderAt: j.lastReminderAt ?? 0,
+      toolCallsSinceReply: j.toolCallsSinceReply ?? 0,
+    }
+  } catch {
+    return { lastInboundAt: 0, lastReplyAt: 0, lastReminderAt: 0, toolCallsSinceReply: 0 }
+  }
+}
+function writeSilence(patch: Partial<SilenceState>): void {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+    const merged: SilenceState = { ...readSilence(), ...patch }
+    const tmp = SILENCE_FILE + '.tmp'
+    writeFileSync(tmp, JSON.stringify(merged) + '\n', { mode: 0o600 })
+    renameSync(tmp, SILENCE_FILE)
+  } catch {
+    // Heuristic state — losing a write is fine, never block a send for it.
+  }
+}
+function markReplySent(): void {
+  writeSilence({ lastReplyAt: Math.floor(Date.now() / 1000), toolCallsSinceReply: 0 })
+}
+function markInbound(): void {
+  writeSilence({ lastInboundAt: Math.floor(Date.now() / 1000) })
 }
 
 function pruneExpired(a: Access): boolean {
@@ -621,6 +666,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           }
         }
 
+        markReplySent()
         const result =
           sentIds.length === 1
             ? `sent (id: ${sentIds[0]})`
@@ -662,6 +708,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           args.text as string,
           ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
         )
+        markReplySent()
         const id = typeof edited === 'object' ? edited.message_id : args.message_id
         return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
       }
@@ -1166,6 +1213,8 @@ async function handleInbound(
   }
 
   const imagePath = downloadImage ? await downloadImage() : undefined
+
+  markInbound()
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.

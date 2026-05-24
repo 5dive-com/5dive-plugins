@@ -1,5 +1,5 @@
 {
-  "description": "5dive telegram plugin lifecycle hooks — block invisible pickers in telegram-paired sessions, and catch 'agent talked to the transcript instead of replying' misses.",
+  "description": "5dive telegram plugin lifecycle hooks — block invisible pickers in telegram-paired sessions, nudge the agent when it goes silent on Telegram, and catch 'agent talked to the transcript instead of replying' misses.",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,17 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pretool-question.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/silence-watchdog.sh",
             "timeout": 5
           }
         ]

@@ -240,7 +240,7 @@ allowed-cmd list. Floor: `/help` and `/whoami` always allowed.
 Update `plugins/telegram/README.md` with the full command catalog. Mirror
 into `5dive-blog/` if user wants public docs.
 
-### T17a — Silence-prevention via system-reminder hook
+### T17a — Silence-prevention via system-reminder hook ✅ (shipped v0.3.2)
 
 Mechanical fix for "Claude went 10 minutes silent on Telegram." Prose
 instructions (CLAUDE.md, notify-user skill, silence-threshold memory)
