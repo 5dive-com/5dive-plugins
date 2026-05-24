@@ -1,17 +1,6 @@
 {
-  "description": "5dive telegram plugin lifecycle hooks — block invisible pickers, catch 'agent talked to the transcript instead of replying' misses, and drive the status-bubble watchdog.",
+  "description": "5dive telegram plugin lifecycle hooks — block invisible pickers in telegram-paired sessions, and catch 'agent talked to the transcript instead of replying' misses.",
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/watchdog-start.sh",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "AskUserQuestion|ExitPlanMode",
@@ -19,15 +8,6 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pretool-question.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/watchdog-tick.sh",
             "timeout": 5
           }
         ]
@@ -40,11 +20,6 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-reply-check.sh",
             "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/watchdog-stop.sh",
-            "timeout": 5
           }
         ]
       }
