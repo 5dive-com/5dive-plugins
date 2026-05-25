@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pretool-question.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pretool-question.ts",
             "timeout": 5
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/silence-watchdog.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/silence-watchdog.ts",
             "timeout": 5
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-reply-check.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-reply-check.ts",
             "timeout": 10
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stopfailure-notify.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stopfailure-notify.ts",
             "timeout": 10
           }
         ]
