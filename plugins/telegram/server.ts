@@ -1035,15 +1035,18 @@ function effortKeyboard(current?: string): InlineKeyboard {
   return kb
 }
 
-// /account keyboard: single inline row matching /model and /effort, plus a
-// final "default" button that clears the binding. Active option marked the
-// same way as the other pickers (see modelKeyboard above for the noop trick).
+// /account keyboard: one button per row so longer account names render at
+// readable width (Telegram squeezes inline buttons that share a row). Final
+// "default" button clears the binding. Active option marked the same way as
+// the other pickers (see modelKeyboard above for the noop trick).
 function accountKeyboard(names: string[], current: string): InlineKeyboard {
   const kb = new InlineKeyboard()
-  for (const name of [...names, 'default']) {
+  const all = [...names, 'default']
+  all.forEach((name, i) => {
     if (name === current) kb.text(`✓ ${name}`, 'account:noop')
     else kb.text(name, `account:${name}`)
-  }
+    if (i < all.length - 1) kb.row()
+  })
   return kb
 }
 
@@ -1325,7 +1328,9 @@ const commandHandlers: Record<string, CommandHandler> = {
       const me = (process.env.USER ?? '').replace(/^agent-/, '')
       const lines = j.data.map((a: any) => {
         const marker = a.name === me ? ' ← you' : ''
-        const ch = a.channels && a.channels !== 'none' ? ` [${a.channels}]` : ''
+        let ch = ''
+        if (a.channels === 'telegram' && a.botUsername) ch = ` @${a.botUsername}`
+        else if (a.channels && a.channels !== 'none') ch = ` [${a.channels}]`
         const profile = a.authProfile && a.authProfile !== '-' ? ` (${a.authProfile})` : ''
         return `• ${a.name} · ${a.type}${ch}${profile} · ${a.active}${marker}`
       })
