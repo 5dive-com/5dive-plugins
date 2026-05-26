@@ -61,7 +61,7 @@ export const COMMAND_REGISTRY: CommandDef[] = [
   },
   {
     name: 'agents',
-    description: 'Sibling agents',
+    description: 'Team',
     scope: 'paired-5dive',
   },
   {
