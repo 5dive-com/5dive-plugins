@@ -298,15 +298,26 @@ type GoalState = {
   startedAt: number
   chatId: string
   setBy: string
+  /** Set when the user runs /goal pause; cleared on resume/set. */
+  pausedAt?: number
 }
 function readGoal(): GoalState | null {
   try {
     const j = JSON.parse(readFileSync(GOAL_FILE, 'utf8')) as Partial<GoalState>
     if (typeof j.goal !== 'string' || typeof j.startedAt !== 'number') return null
-    return { goal: j.goal, startedAt: j.startedAt, chatId: j.chatId ?? '', setBy: j.setBy ?? '' }
+    return {
+      goal: j.goal,
+      startedAt: j.startedAt,
+      chatId: j.chatId ?? '',
+      setBy: j.setBy ?? '',
+      pausedAt: typeof j.pausedAt === 'number' ? j.pausedAt : undefined,
+    }
   } catch {
     return null
   }
+}
+function clearGoal(): void {
+  try { rmSync(GOAL_FILE, { force: true }) } catch {}
 }
 function writeGoal(g: GoalState): void {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
@@ -1400,10 +1411,12 @@ const commandHandlers: Record<string, CommandHandler> = {
 
   // /goal — proxy of Claude Code's /loop. `/goal <text>` injects /loop <text>
   // into the running TUI (dynamic self-pacing mode) and persists state so
-  // /goal status can answer later. No args (or "status") prints the current
-  // goal. We don't try to introspect /loop's internal state — the file is the
-  // source of truth from our side; if the user /stop'd the agent, the goal
-  // line still shows what it was working on until they replace or clear it.
+  // /goal status can answer later. Subcommands: status / pause / resume /
+  // clear. Pause/resume can't truly suspend the loop from outside Claude —
+  // we send a natural-language directive into the TUI and trust the agent
+  // to act on it; the file is the source of truth for what /goal status
+  // reports. If the user /stop'd the agent the line still shows what it
+  // was working on until they replace or clear it.
   goal: async ctx => {
     const arg = (ctx.match ?? '').trim()
     if (arg === '' || arg === 'status') {
@@ -1413,7 +1426,40 @@ const commandHandlers: Record<string, CommandHandler> = {
         return
       }
       const ago = formatDuration(Date.now() - g.startedAt)
-      await ctx.reply(`📌 Goal: ${g.goal}\nset ${ago} ago`)
+      if (g.pausedAt) {
+        const pausedAgo = formatDuration(Date.now() - g.pausedAt)
+        await ctx.reply(`⏸ Goal (paused): ${g.goal}\nset ${ago} ago · paused ${pausedAgo} ago`)
+      } else {
+        await ctx.reply(`📌 Goal: ${g.goal}\nset ${ago} ago`)
+      }
+      return
+    }
+    if (arg === 'pause') {
+      const g = readGoal()
+      if (!g) { await ctx.reply(`No goal to pause.`); return }
+      if (g.pausedAt) { await ctx.reply(`Goal already paused.`); return }
+      writeGoal({ ...g, pausedAt: Date.now() })
+      await ctx.reply(`⏸ Goal paused. Use /goal resume to continue.`)
+      proxyToClaudeTUI(`Pause the /loop — don't schedule any more wake-ups until I say resume. The standing goal is unchanged.`)
+      return
+    }
+    if (arg === 'resume') {
+      const g = readGoal()
+      if (!g) {
+        await ctx.reply(`No goal to resume. Use /goal <text> to set one.`)
+        return
+      }
+      writeGoal({ ...g, pausedAt: undefined })
+      await ctx.reply(`▶ Goal resumed: ${g.goal}`)
+      proxyToClaudeTUI(`/loop ${g.goal}`)
+      return
+    }
+    if (arg === 'clear') {
+      const g = readGoal()
+      if (!g) { await ctx.reply(`No goal to clear.`); return }
+      clearGoal()
+      await ctx.reply(`Goal cleared.`)
+      proxyToClaudeTUI(`Clear the standing goal — end any active /loop and stop scheduling wake-ups.`)
       return
     }
     writeGoal({

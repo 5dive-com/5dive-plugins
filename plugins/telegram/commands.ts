@@ -76,7 +76,7 @@ export const COMMAND_REGISTRY: CommandDef[] = [
   },
   {
     name: 'goal',
-    description: 'Set a goal the agent self-paces toward via /loop (or "status")',
+    description: 'Set a self-paced goal via /loop. Subcmds: status / pause / resume / clear',
     scope: 'paired',
   },
 ]
