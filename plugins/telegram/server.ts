@@ -1349,32 +1349,91 @@ const commandHandlers: Record<string, CommandHandler> = {
     r.after?.()
   },
 
-  // /agents — list sibling agents managed by 5dive on the same host. Requires
-  // `sudo 5dive` to read the agent registry.
+  // /agents — list sibling agents managed by 5dive on the same host, or
+  // operate on one. Requires `sudo 5dive`. Subcommands:
+  //   (none)         → list (back-compat)
+  //   stop <name>    → `sudo 5dive agent stop <name>` (refuse self — would
+  //                    kill this bot mid-reply)
+  // Future: start / restart, same pattern.
   agents: async ctx => {
+    const arg = (ctx.match ?? '').trim()
+    const parts = arg.split(/\s+/).filter(Boolean)
+    const me = (process.env.USER ?? '').replace(/^agent-/, '')
+
+    if (parts.length === 0) {
+      try {
+        const { stdout } = await execFileP('sudo', ['-n', '5dive', 'agent', 'list', '--json'])
+        const j = JSON.parse(stdout)
+        if (!j.ok || !Array.isArray(j.data)) {
+          await ctx.reply(`5dive returned unexpected output.`)
+          return
+        }
+        if (j.data.length === 0) {
+          await ctx.reply(`No agents configured.`)
+          return
+        }
+        const lines = j.data.map((a: any) => {
+          const marker = a.name === me ? ' ← you' : ''
+          let ch = ''
+          if (a.channels === 'telegram' && a.botUsername) ch = ` @${a.botUsername}`
+          else if (a.channels && a.channels !== 'none') ch = ` [${a.channels}]`
+          const profile = a.authProfile && a.authProfile !== '-' ? ` (${a.authProfile})` : ''
+          return `• ${a.name} · ${a.type}${ch}${profile} · ${a.active}${marker}`
+        })
+        await ctx.reply(`Agents on this host:\n\n${lines.join('\n')}`)
+      } catch (err) {
+        await ctx.reply(`Failed to list agents: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      return
+    }
+
+    if (parts[0] === 'stop' && parts.length === 2) {
+      const name = parts[1]!
+      if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
+        await ctx.reply(`Invalid agent name.`)
+        return
+      }
+      if (name === me) {
+        await ctx.reply(`Can't stop yourself (would kill this bot mid-reply).`)
+        return
+      }
+      try {
+        const { stdout } = await execFileP(
+          'sudo', ['-n', '5dive', 'agent', 'stop', name, '--json'], { timeout: 5000 },
+        )
+        const j = JSON.parse(stdout)
+        if (!j.ok) {
+          await ctx.reply(`Failed: ${j.error?.message ?? 'unknown error'}`)
+          return
+        }
+        await ctx.reply(`✅ Stopped agent "${name}".`)
+      } catch (err: any) {
+        const stderr = err?.stderr ? String(err.stderr).trim() : ''
+        await ctx.reply(`Failed to stop ${name}: ${stderr || (err instanceof Error ? err.message : String(err))}`)
+      }
+      return
+    }
+
+    await ctx.reply(`Usage:\n/agents — list\n/agents stop <name> — stop an agent`)
+  },
+
+  // /clear — inject Claude Code's built-in `/clear` into the running TUI.
+  // Lighter than /restart (no process kill, no systemd respawn delay): wipes
+  // the session's context in-place. Matches Claude Code's own /clear
+  // semantics so muscle memory transfers. Same tmux send-keys wiring as
+  // /stop and proxyToClaudeTUI — agent's session is named after its user.
+  clear: async ctx => {
+    const user = process.env.USER ?? process.env.LOGNAME ?? ''
+    const target = user.startsWith('agent-') ? user : ''
+    if (!target) {
+      await ctx.reply(`Can't determine tmux session name (USER=${user || '?'}).`)
+      return
+    }
     try {
-      const { stdout } = await execFileP('sudo', ['-n', '5dive', 'agent', 'list', '--json'])
-      const j = JSON.parse(stdout)
-      if (!j.ok || !Array.isArray(j.data)) {
-        await ctx.reply(`5dive returned unexpected output.`)
-        return
-      }
-      if (j.data.length === 0) {
-        await ctx.reply(`No agents configured.`)
-        return
-      }
-      const me = (process.env.USER ?? '').replace(/^agent-/, '')
-      const lines = j.data.map((a: any) => {
-        const marker = a.name === me ? ' ← you' : ''
-        let ch = ''
-        if (a.channels === 'telegram' && a.botUsername) ch = ` @${a.botUsername}`
-        else if (a.channels && a.channels !== 'none') ch = ` [${a.channels}]`
-        const profile = a.authProfile && a.authProfile !== '-' ? ` (${a.authProfile})` : ''
-        return `• ${a.name} · ${a.type}${ch}${profile} · ${a.active}${marker}`
-      })
-      await ctx.reply(`Agents on this host:\n\n${lines.join('\n')}`)
+      await execFileP('tmux', ['send-keys', '-t', `${target}:0`, '/clear', 'Enter'])
+      await ctx.reply(`Sent /clear — context wiped, session continues. (For a full process respawn use /restart.)`)
     } catch (err) {
-      await ctx.reply(`Failed to list agents: ${err instanceof Error ? err.message : String(err)}`)
+      await ctx.reply(`Failed to send /clear: ${err instanceof Error ? err.message : String(err)}`)
     }
   },
 

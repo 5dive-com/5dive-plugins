@@ -55,8 +55,13 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     scope: 'paired',
   },
   {
+    name: 'clear',
+    description: "Wipe Claude's context in-place (lighter than /restart, no respawn)",
+    scope: 'paired',
+  },
+  {
     name: 'agents',
-    description: 'List agents on this host',
+    description: 'List agents on this host (or `stop <name>` to stop one)',
     scope: 'paired',
   },
   {
