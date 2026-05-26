@@ -957,7 +957,7 @@ function readContextPct(session: { sessionId: string; cwd: string }): number | n
 // permitted by the agent's sudoers entry (see /agents handler).
 type FiveDiveAgentEntry = {
   name: string
-  profile?: string
+  authProfile?: string
 }
 
 async function read5diveAgentList(): Promise<FiveDiveAgentEntry[] | null> {
@@ -1306,7 +1306,7 @@ const commandHandlers: Record<string, CommandHandler> = {
       const lines = j.data.map((a: any) => {
         const marker = a.name === me ? ' ← you' : ''
         const ch = a.channels && a.channels !== 'none' ? ` [${a.channels}]` : ''
-        const profile = a.profile && a.profile !== '-' ? ` (${a.profile})` : ''
+        const profile = a.authProfile && a.authProfile !== '-' ? ` (${a.authProfile})` : ''
         return `• ${a.name} · ${a.type}${ch}${profile} · ${a.active}${marker}`
       })
       await ctx.reply(`Agents on this host:\n\n${lines.join('\n')}`)
@@ -1338,12 +1338,10 @@ const commandHandlers: Record<string, CommandHandler> = {
       )
       return
     }
-    const current = agents?.find(a => a.name === me)?.profile || 'default'
+    const current = agents?.find(a => a.name === me)?.authProfile || 'default'
     const kb = accountKeyboard(accounts.map(a => a.name), current)
     const lines = [
       `Current account: ${current}`,
-      ``,
-      `Pick a row to switch (✓ = active). "default" clears the binding so this agent uses the host's default credentials.`,
     ]
     await ctx.reply(lines.join('\n'), { reply_markup: kb })
   },
