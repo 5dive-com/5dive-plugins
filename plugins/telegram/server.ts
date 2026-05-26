@@ -40,6 +40,7 @@ const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const APPROVED_DIR = join(STATE_DIR, 'approved')
 const ENV_FILE = join(STATE_DIR, '.env')
 const SILENCE_FILE = join(STATE_DIR, 'silence.json')
+const GOAL_FILE = join(STATE_DIR, 'goal.json')
 
 // Load ~/.claude/channels/telegram/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — this is where the token lives.
@@ -286,6 +287,32 @@ function markReplySent(): void {
 }
 function markInbound(): void {
   writeSilence({ lastInboundAt: Math.floor(Date.now() / 1000) })
+}
+
+// /goal state — one standing goal per agent (we don't multiplex across chats;
+// a single Claude session can only work on one thing at a time anyway). The
+// file is the source of truth for /goal status — Claude's own /loop state
+// isn't introspectable from outside.
+type GoalState = {
+  goal: string
+  startedAt: number
+  chatId: string
+  setBy: string
+}
+function readGoal(): GoalState | null {
+  try {
+    const j = JSON.parse(readFileSync(GOAL_FILE, 'utf8')) as Partial<GoalState>
+    if (typeof j.goal !== 'string' || typeof j.startedAt !== 'number') return null
+    return { goal: j.goal, startedAt: j.startedAt, chatId: j.chatId ?? '', setBy: j.setBy ?? '' }
+  } catch {
+    return null
+  }
+}
+function writeGoal(g: GoalState): void {
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+  const tmp = GOAL_FILE + '.tmp'
+  writeFileSync(tmp, JSON.stringify(g, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, GOAL_FILE)
 }
 
 // Sticky-header anchors: every reply is remembered so subsequent
@@ -1369,6 +1396,34 @@ const commandHandlers: Record<string, CommandHandler> = {
       `Current account: ${current}`,
     ]
     await ctx.reply(lines.join('\n'), { reply_markup: kb })
+  },
+
+  // /goal — proxy of Claude Code's /loop. `/goal <text>` injects /loop <text>
+  // into the running TUI (dynamic self-pacing mode) and persists state so
+  // /goal status can answer later. No args (or "status") prints the current
+  // goal. We don't try to introspect /loop's internal state — the file is the
+  // source of truth from our side; if the user /stop'd the agent, the goal
+  // line still shows what it was working on until they replace or clear it.
+  goal: async ctx => {
+    const arg = (ctx.match ?? '').trim()
+    if (arg === '' || arg === 'status') {
+      const g = readGoal()
+      if (!g) {
+        await ctx.reply(`No goal set.\n\nUse /goal <text> — the agent self-paces toward it via /loop.`)
+        return
+      }
+      const ago = formatDuration(Date.now() - g.startedAt)
+      await ctx.reply(`📌 Goal: ${g.goal}\nset ${ago} ago`)
+      return
+    }
+    writeGoal({
+      goal: arg,
+      startedAt: Date.now(),
+      chatId: String(ctx.chat!.id),
+      setBy: String(ctx.from!.id),
+    })
+    await ctx.reply(`✅ Goal set: ${arg}\n\nSending /loop to the agent now.`)
+    proxyToClaudeTUI(`/loop ${arg}`)
   },
 }
 

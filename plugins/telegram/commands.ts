@@ -74,6 +74,11 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     description: 'Show or switch the auth account (5dive-managed hosts only)',
     scope: 'paired-5dive',
   },
+  {
+    name: 'goal',
+    description: 'Set a goal the agent self-paces toward via /loop (or "status")',
+    scope: 'paired',
+  },
 ]
 
 /** Short model alias → full Claude Code model ID. Add new tiers here. */
