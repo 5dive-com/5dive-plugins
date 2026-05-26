@@ -30,58 +30,58 @@ export interface CommandDef {
 export const COMMAND_REGISTRY: CommandDef[] = [
   {
     name: 'start',
-    description: 'Pairing instructions (run before linking a session)',
+    description: 'Pairing instructions',
     scope: 'allowed',
     hidden: true,
   },
   {
     name: 'help',
-    description: 'Show available commands',
+    description: 'List commands',
     scope: 'allowed',
   },
   {
     name: 'status',
-    description: 'Pairing state + session health (uptime, model, last activity)',
+    description: 'Pairing, usage, model, context',
     scope: 'allowed',
   },
   {
     name: 'stop',
-    description: "Interrupt the agent's current task (Ctrl-C)",
+    description: 'Interrupt current task',
     scope: 'paired',
   },
   {
     name: 'restart',
-    description: 'Kill claude and let systemd respawn it',
+    description: 'Respawn claude (kill + systemd)',
     scope: 'paired',
   },
   {
     name: 'clear',
-    description: "Wipe Claude's context in-place (lighter than /restart, no respawn)",
+    description: 'Wipe context (in-place; no respawn)',
     scope: 'paired',
   },
   {
     name: 'agents',
-    description: 'List agents (or `start|stop|restart <name>` to control one)',
-    scope: 'paired',
+    description: 'List or control sibling agents',
+    scope: 'paired-5dive',
   },
   {
     name: 'model',
-    description: 'Show or switch model (opus | sonnet | haiku)',
+    description: 'Show or switch model',
     scope: 'paired',
   },
   {
     name: 'effort',
-    description: 'Show or switch reasoning effort (low | medium | high | xhigh | max)',
+    description: 'Show or switch reasoning effort',
     scope: 'paired',
   },
   {
     name: 'account',
-    description: 'Show or switch the auth account (5dive-managed hosts only)',
+    description: 'Show or switch auth account',
     scope: 'paired-5dive',
   },
   {
     name: 'goal',
-    description: 'Set a self-paced goal via /loop. Subcmds: status / pause / resume / clear',
+    description: 'Self-paced goal via /loop',
     scope: 'paired',
   },
 ]

@@ -1394,8 +1394,8 @@ const commandHandlers: Record<string, CommandHandler> = {
     // no-op and we let it through.
     const LIFECYCLE: Record<string, { selfBlocked: boolean; past: string; selfHint?: string }> = {
       start:   { selfBlocked: false, past: 'Started' },
-      stop:    { selfBlocked: true,  past: 'Stopped',   selfHint: '/stop interrupts this session; /restart respawns it' },
-      restart: { selfBlocked: true,  past: 'Restarted', selfHint: 'use /restart instead — it respawns this agent in place' },
+      stop:    { selfBlocked: true,  past: 'Stopped',   selfHint: 'would kill this bot with no remote way to bring it back up' },
+      restart: { selfBlocked: true,  past: 'Restarted', selfHint: 'use /restart instead — same effect, but the reply lands before the respawn' },
     }
     if (parts.length === 2 && parts[0]! in LIFECYCLE) {
       const action = parts[0]!
@@ -1568,7 +1568,7 @@ for (const def of COMMAND_REGISTRY) {
       // Silently no-op rather than echoing "command unknown" so an upstream
       // host doesn't leak the existence of 5dive-only commands. The /help
       // text already hides them for non-5dive hosts.
-      await ctx.reply(`/${def.name} is only available on 5dive-managed hosts.`)
+      await ctx.reply(`/${def.name} requires the 5dive CLI — not detected on this host.`)
       return
     }
     await handler(ctx, gate)
