@@ -55,7 +55,7 @@ Claude Code 2.1.150+ enforces an allowlist for channel plugins. Add it to manage
 }
 ```
 
-**Team/org accounts** (Anthropic Console OAuth) — the local file is **ignored**; remote policy overrides it. Set the same JSON at **claude.ai → Admin Settings → Claude Code → Managed settings → Manage**. Personal accounts can use this path too if they prefer.
+**Team/org accounts** (Anthropic Console OAuth) — the local file is **ignored**; remote policy overrides it. Set the same JSON at [claude.ai](https://claude.ai/) → **Admin Settings → Claude Code → Managed settings (settings.json) → click "Manage"**, paste the JSON into the textarea, and save. Personal accounts can use this path too if they prefer.
 
 > Symptom if missing: the MCP log shows `Channel notifications skipped: plugin telegram@... is not on the approved channels allowlist`, and your bot's DMs never reach Claude.
 

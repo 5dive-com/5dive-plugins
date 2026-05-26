@@ -21,7 +21,7 @@ On an Anthropic Teams account, the channel-plugin allowlist is controlled by you
 Channel notifications skipped: plugin telegram@5dive-plugins is not on the approved channels allowlist
 ```
 
-**Fix:** your org admin opens the [Anthropic Console](https://console.anthropic.com/) and sets the org-level managed-settings to:
+**Fix:** your org admin opens [claude.ai](https://claude.ai/) and navigates to **Admin Settings → Claude Code → Managed settings (settings.json) → click "Manage"**, then pastes the JSON below into the Managed settings textarea and saves:
 
 ```json
 {
