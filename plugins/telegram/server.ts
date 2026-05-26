@@ -872,6 +872,124 @@ async function read5diveVersion(): Promise<string | null> {
   }
 }
 
+// Read the rate-limit snapshot the statusline script wrote to disk on its
+// last invocation. Claude holds rate_limits in-process and only emits it
+// when statusline renders, so this file is our only readable mirror. Stale
+// while the user is idle (no statusline renders → no fresh write), but
+// good enough for an on-demand /status. Returns null when the file is
+// missing (non-5dive host, statusline not wired yet) or unparseable.
+function readStatuslineCache(): {
+  five_hour_pct?: number
+  seven_day_pct?: number
+} | null {
+  try {
+    const raw = readFileSync(join(homedir(), '.claude', 'statusline-last.json'), 'utf8')
+    const j = JSON.parse(raw)
+    const five = j?.rate_limits?.five_hour?.used_percentage
+    const seven = j?.rate_limits?.seven_day?.used_percentage
+    if (typeof five !== 'number' && typeof seven !== 'number') return null
+    return {
+      five_hour_pct: typeof five === 'number' ? five : undefined,
+      seven_day_pct: typeof seven === 'number' ? seven : undefined,
+    }
+  } catch {
+    return null
+  }
+}
+
+// Compute the running context-window utilisation for the active session.
+// Walks the JSONL transcript backwards and pulls the latest assistant turn's
+// usage block; total tokens = input + cache_creation + cache_read (every
+// cached token still counts against the window). The session record from
+// findActiveSession() gives us the cwd + sessionId we need to locate the
+// file. Returns null when we can't find / parse a usable usage line.
+//
+// CONTEXT_WINDOW is 200k — matches Opus 4.7, Sonnet 4.6, and Haiku 4.5; if a
+// future model widens the window we'll surface a misleading low percentage,
+// but the floor (not the ceiling) is the user-visible cap that matters here.
+const CONTEXT_WINDOW_TOKENS = 200_000
+function readContextPct(session: { sessionId: string; cwd: string }): number | null {
+  try {
+    // ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl — claude encodes the
+    // cwd by replacing every '/' with '-' (see the directory listing under
+    // ~/.claude/projects/). Be defensive: if our encoding diverges from
+    // claude's, fall back to a glob over the projects dir for the sessionId.
+    const projects = join(homedir(), '.claude', 'projects')
+    const encoded = '-' + session.cwd.replace(/^\//, '').replace(/\//g, '-')
+    let jsonlPath = join(projects, encoded, `${session.sessionId}.jsonl`)
+    try { statSync(jsonlPath) } catch {
+      jsonlPath = ''
+      for (const d of readdirSync(projects)) {
+        const cand = join(projects, d, `${session.sessionId}.jsonl`)
+        try { statSync(cand); jsonlPath = cand; break } catch {}
+      }
+      if (!jsonlPath) return null
+    }
+    const raw = readFileSync(jsonlPath, 'utf8')
+    // Scan from the bottom: most recent assistant turn wins. Pre-split keeps
+    // peak memory bounded vs walking the whole file in one pass.
+    const lines = raw.split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]
+      if (!line || line.indexOf('"usage"') === -1) continue
+      let j: any
+      try { j = JSON.parse(line) } catch { continue }
+      const u = j?.message?.usage
+      if (!u || typeof u.input_tokens !== 'number') continue
+      const total =
+        (u.input_tokens ?? 0) +
+        (u.cache_creation_input_tokens ?? 0) +
+        (u.cache_read_input_tokens ?? 0)
+      if (total <= 0) continue
+      return Math.min(100, Math.round((total / CONTEXT_WINDOW_TOKENS) * 100))
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+// 5dive's `agent list --json` shape, narrowed to the fields /status and
+// /account consume. Other fields exist (type, channels, active) but are
+// unused here. Read via `sudo -n 5dive agent list --json` which is already
+// permitted by the agent's sudoers entry (see /agents handler).
+type FiveDiveAgentEntry = {
+  name: string
+  profile?: string
+}
+
+async function read5diveAgentList(): Promise<FiveDiveAgentEntry[] | null> {
+  try {
+    const { stdout } = await execFileP('sudo', ['-n', '5dive', 'agent', 'list', '--json'], { timeout: 3000 })
+    const j = JSON.parse(stdout)
+    if (j?.ok && Array.isArray(j.data)) return j.data as FiveDiveAgentEntry[]
+    return null
+  } catch {
+    return null
+  }
+}
+
+type FiveDiveAccountEntry = { name: string; types?: string[]; agents?: string[] }
+
+async function read5diveAccountList(): Promise<FiveDiveAccountEntry[] | null> {
+  try {
+    const { stdout } = await execFileP('sudo', ['-n', '5dive', 'account', 'list', '--json'], { timeout: 3000 })
+    const j = JSON.parse(stdout)
+    if (j?.ok && Array.isArray(j.data)) return j.data as FiveDiveAccountEntry[]
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Map the agent user (agent-<name>) back to the registry name. Returns ''
+// for non-agent users (e.g. running the plugin as `claude` on the host),
+// which the callers treat as "5dive account features unavailable".
+function thisAgentName(): string {
+  const user = process.env.USER ?? process.env.LOGNAME ?? ''
+  return user.startsWith('agent-') ? user.slice('agent-'.length) : ''
+}
+
 // In-place edit of ~/.claude/settings.json, used by /model and /effort.
 // Parse → merge → write back atomically. Preserves every other key. Throws
 // on missing/corrupt file so the caller can surface the error to the user.
@@ -900,6 +1018,25 @@ function effortKeyboard(): InlineKeyboard {
   return kb
 }
 
+// /account keyboard: one row per account, plus a final "default" row that
+// clears the binding. The active row is rendered as a no-op button (prefix
+// "✓ ", callback_data "account:noop") so the user sees which one is current.
+// Telegram requires callback_data on every button — there's no "disabled"
+// flag — so the noop variant is the conventional workaround. The callback
+// handler ignores `account:noop`.
+function accountKeyboard(names: string[], current: string): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  const rows = [...names, 'default']
+  for (const name of rows) {
+    if (name === current) {
+      kb.text(`✓ ${name}`, 'account:noop').row()
+    } else {
+      kb.text(name, `account:${name}`).row()
+    }
+  }
+  return kb
+}
+
 // Shared apply path for the text and callback flows. Edits settings.json
 // and returns the status string + a deferred-restart fn the caller invokes
 // AFTER it finishes its outbound Telegram I/O. Triggering SIGTERM inline
@@ -924,6 +1061,32 @@ function applyModel(alias: string): ApplyResult {
     restart: scheduleClaudeRestart,
   }
 }
+// Apply path for /account: shell out to `sudo -n 5dive agent set-account
+// <me> <name>` (which writes the registry + repoints the agent's auth-profile
+// symlink). On success we still need to restart claude so the running
+// session picks up the new credentials — same SIGTERM-deferred pattern as
+// applyModel/applyEffort. Returns a status string + deferred restart fn.
+async function applyAccount(name: string): Promise<ApplyResult> {
+  const me = thisAgentName()
+  if (!me) return { text: `Can't determine this agent's name (not running as agent-* user).` }
+  // Validate against the shell command we're about to construct. The CLI
+  // also validates, but rejecting here means we never spawn a sudo process
+  // with attacker-controlled input that happens to escape argv quoting.
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name) && name !== 'default') {
+    return { text: `Invalid account name.` }
+  }
+  try {
+    await execFileP('sudo', ['-n', '5dive', 'agent', 'set-account', me, name], { timeout: 5000 })
+  } catch (err: any) {
+    const stderr = err?.stderr ? String(err.stderr).trim() : ''
+    return { text: `Failed to set account: ${stderr || (err instanceof Error ? err.message : String(err))}` }
+  }
+  return {
+    text: `✅ Account → ${name}\n\n⚠️  Claude is restarting in ~1s so the new credentials take effect.`,
+    restart: scheduleClaudeRestart,
+  }
+}
+
 function applyEffort(level: string): ApplyResult {
   if (!(EFFORT_LEVELS as readonly string[]).includes(level)) {
     return { text: `Unknown effort "${level}".` }
@@ -992,7 +1155,8 @@ const commandHandlers: Record<string, CommandHandler> = {
   },
 
   help: async ctx => {
-    await ctx.reply(renderHelpBody(COMMAND_REGISTRY))
+    const fiveDivePresent = (await read5diveVersion()) !== null
+    await ctx.reply(renderHelpBody(COMMAND_REGISTRY, fiveDivePresent))
   },
 
   status: async (ctx, { access, senderId }) => {
@@ -1020,6 +1184,17 @@ const commandHandlers: Record<string, CommandHandler> = {
       const { model, effort } = readClaudeModelAndEffort(session.pid)
       lines.push(`status: ${session.status}`)
       if (model) lines.push(`model: ${model}${effort ? ` · ${effort}` : ''}`)
+      // Usage line: 5h / 7d come from the statusline cache; context %
+      // from the latest assistant turn in the JSONL transcript. Each
+      // value is optional — emit a single combined line when at least
+      // one is present, dropping the missing pieces silently.
+      const usage = readStatuslineCache()
+      const ctxPct = readContextPct(session)
+      const usageParts: string[] = []
+      if (typeof ctxPct === 'number') usageParts.push(`ctx: ${ctxPct}%`)
+      if (usage?.five_hour_pct !== undefined) usageParts.push(`5h: ${Math.round(usage.five_hour_pct)}%`)
+      if (usage?.seven_day_pct !== undefined) usageParts.push(`7d: ${Math.round(usage.seven_day_pct)}%`)
+      if (usageParts.length) lines.push(`usage: ${usageParts.join(' · ')}`)
       lines.push(`uptime: ${formatDuration(now - session.startedAt)}`)
       lines.push(`last activity: ${formatDuration(now - session.updatedAt)} ago`)
       lines.push(`claude: v${session.version}`)
@@ -1137,6 +1312,39 @@ const commandHandlers: Record<string, CommandHandler> = {
       await ctx.reply(`Failed to list agents: ${err instanceof Error ? err.message : String(err)}`)
     }
   },
+
+  // /account — show or switch the auth profile bound to THIS agent. Lists
+  // every account known to `sudo -n 5dive account list` and renders one
+  // button per name (plus a "default" button that clears the binding,
+  // matching `5dive agent set-account <agent> default`). The currently-bound
+  // account is rendered as a no-op button prefixed with ✓ so the user can
+  // see at a glance which row is active.
+  account: async ctx => {
+    const me = thisAgentName()
+    if (!me) {
+      await ctx.reply(`Can't determine this agent's name (not running as agent-* user).`)
+      return
+    }
+    const [accounts, agents] = await Promise.all([read5diveAccountList(), read5diveAgentList()])
+    if (!accounts) {
+      await ctx.reply(`Failed to list accounts. Try: sudo 5dive account list`)
+      return
+    }
+    if (accounts.length === 0) {
+      await ctx.reply(
+        `No accounts configured.\n\nAdd one with: sudo 5dive account add <name>`,
+      )
+      return
+    }
+    const current = agents?.find(a => a.name === me)?.profile || 'default'
+    const kb = accountKeyboard(accounts.map(a => a.name), current)
+    const lines = [
+      `Current account: ${current}`,
+      ``,
+      `Pick a row to switch (✓ = active). "default" clears the binding so this agent uses the host's default credentials.`,
+    ]
+    await ctx.reply(lines.join('\n'), { reply_markup: kb })
+  },
 }
 
 for (const def of COMMAND_REGISTRY) {
@@ -1148,8 +1356,16 @@ for (const def of COMMAND_REGISTRY) {
   bot.command(def.name, async ctx => {
     const gate = dmCommandGate(ctx)
     if (!gate) return
-    if (def.scope === 'paired' && !gate.access.allowFrom.includes(gate.senderId)) {
+    if ((def.scope === 'paired' || def.scope === 'paired-5dive')
+        && !gate.access.allowFrom.includes(gate.senderId)) {
       await ctx.reply(`Not paired — /${def.name} requires a paired session.`)
+      return
+    }
+    if (def.scope === 'paired-5dive' && !(await read5diveVersion())) {
+      // Silently no-op rather than echoing "command unknown" so an upstream
+      // host doesn't leak the existence of 5dive-only commands. The /help
+      // text already hides them for non-5dive hosts.
+      await ctx.reply(`/${def.name} is only available on 5dive-managed hosts.`)
       return
     }
     await handler(ctx, gate)
@@ -1186,6 +1402,22 @@ bot.on('callback_query:data', async ctx => {
   const effortM = /^effort:([a-z]+)$/.exec(data)
   if (effortM) {
     const r = applyEffort(effortM[1]!)
+    await ctx.answerCallbackQuery({ text: r.restart ? 'Switching…' : 'Failed' }).catch(() => {})
+    await ctx.editMessageText(r.text).catch(() => {})
+    r.restart?.()
+    return
+  }
+  // /account picker: account:noop is the active-row no-op; account:<name>
+  // re-binds via `5dive agent set-account`. Same await-then-restart shape
+  // as /model so the user sees the confirmation message before SIGTERM
+  // races the outbound HTTP request.
+  if (data === 'account:noop') {
+    await ctx.answerCallbackQuery({ text: 'Already active.' }).catch(() => {})
+    return
+  }
+  const accountM = /^account:([a-z][a-z0-9_-]{0,31}|default)$/.exec(data)
+  if (accountM) {
+    const r = await applyAccount(accountM[1]!)
     await ctx.answerCallbackQuery({ text: r.restart ? 'Switching…' : 'Failed' }).catch(() => {})
     await ctx.editMessageText(r.text).catch(() => {})
     r.restart?.()
@@ -1462,10 +1694,16 @@ void (async () => {
           attempt = 0
           botUsername = info.username
           process.stderr.write(`telegram channel: polling as @${info.username}\n`)
-          void bot.api.setMyCommands(
-            botFatherCommands(),
-            { scope: { type: 'all_private_chats' } },
-          ).catch(() => {})
+          // BotFather menu reflects host capabilities at startup. read5diveVersion()
+          // shells out to `5dive --version` — fast (<100ms) but async, so do it
+          // outside the synchronous bot.api call.
+          void (async () => {
+            const fiveDivePresent = (await read5diveVersion()) !== null
+            await bot.api.setMyCommands(
+              botFatherCommands(undefined, fiveDivePresent),
+              { scope: { type: 'all_private_chats' } },
+            ).catch(() => {})
+          })()
         },
       })
       return // bot.stop() was called — clean exit from the loop

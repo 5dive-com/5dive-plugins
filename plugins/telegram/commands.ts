@@ -11,6 +11,12 @@ export type CommandScope =
   | 'allowed'
   /** DM-only, sender must be in access.allowFrom. Dispatcher rejects with a standard message. */
   | 'paired'
+  /** Same as 'paired', but the command is also hidden from /help, BotFather, and
+   *  the dispatcher silently drops it when the host is not 5dive-managed
+   *  (read5diveVersion() returns null). Used for commands that wrap `sudo 5dive`
+   *  subcommands — surfacing them on an upstream-only host would confuse users
+   *  who can't act on them. */
+  | 'paired-5dive'
 
 export interface CommandDef {
   name: string
@@ -63,6 +69,11 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     description: 'Show or switch reasoning effort (low | medium | high | xhigh | max)',
     scope: 'paired',
   },
+  {
+    name: 'account',
+    description: 'Show or switch the auth account (5dive-managed hosts only)',
+    scope: 'paired-5dive',
+  },
 ]
 
 /** Short model alias → full Claude Code model ID. Add new tiers here. */
@@ -76,9 +87,17 @@ export const MODEL_ALIASES: Record<string, string> = {
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export type EffortLevel = (typeof EFFORT_LEVELS)[number]
 
-/** Render the /help body from the registry. Hidden commands are omitted. */
-export function renderHelpBody(registry: CommandDef[] = COMMAND_REGISTRY): string {
-  const visible = registry.filter(c => !c.hidden)
+/** Render the /help body from the registry. Hidden commands are omitted.
+ *  When `fiveDivePresent` is false, 'paired-5dive'-scoped commands are also
+ *  skipped — calling them on an upstream host returns a "5dive not detected"
+ *  error so we'd rather not advertise them. */
+export function renderHelpBody(
+  registry: CommandDef[] = COMMAND_REGISTRY,
+  fiveDivePresent: boolean = true,
+): string {
+  const visible = registry.filter(
+    c => !c.hidden && (fiveDivePresent || c.scope !== 'paired-5dive'),
+  )
   const lines = [
     `This bot bridges your Telegram chat to a Claude Code session — ` +
       `freeform messages and photos are forwarded; replies and reactions come back.`,
@@ -105,8 +124,9 @@ export interface BotCommand {
  */
 export function botFatherCommands(
   registry: CommandDef[] = COMMAND_REGISTRY,
+  fiveDivePresent: boolean = true,
 ): BotCommand[] {
   return registry
-    .filter(c => !c.hidden)
+    .filter(c => !c.hidden && (fiveDivePresent || c.scope !== 'paired-5dive'))
     .map(c => ({ command: c.name, description: c.description }))
 }
