@@ -1387,34 +1387,52 @@ const commandHandlers: Record<string, CommandHandler> = {
       return
     }
 
-    if (parts[0] === 'stop' && parts.length === 2) {
+    // Lifecycle subcommands: start / stop / restart. `rm` is intentionally
+    // omitted — destructive and needs a YES-confirm flow we haven't built.
+    // stop/restart of self are blocked because the action kills this bot
+    // mid-reply (the bot dies with claude); start of self is a harmless
+    // no-op and we let it through.
+    const LIFECYCLE: Record<string, { selfBlocked: boolean; past: string; selfHint?: string }> = {
+      start:   { selfBlocked: false, past: 'Started' },
+      stop:    { selfBlocked: true,  past: 'Stopped',   selfHint: '/stop interrupts this session; /restart respawns it' },
+      restart: { selfBlocked: true,  past: 'Restarted', selfHint: 'use /restart instead — it respawns this agent in place' },
+    }
+    if (parts.length === 2 && parts[0]! in LIFECYCLE) {
+      const action = parts[0]!
+      const cfg = LIFECYCLE[action]!
       const name = parts[1]!
       if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
         await ctx.reply(`Invalid agent name.`)
         return
       }
-      if (name === me) {
-        await ctx.reply(`Can't stop yourself (would kill this bot mid-reply).`)
+      if (cfg.selfBlocked && name === me) {
+        await ctx.reply(`Can't ${action} yourself — ${cfg.selfHint}.`)
         return
       }
       try {
         const { stdout } = await execFileP(
-          'sudo', ['-n', '5dive', 'agent', 'stop', name, '--json'], { timeout: 5000 },
+          'sudo', ['-n', '5dive', 'agent', action, name, '--json'], { timeout: 8000 },
         )
         const j = JSON.parse(stdout)
         if (!j.ok) {
           await ctx.reply(`Failed: ${j.error?.message ?? 'unknown error'}`)
           return
         }
-        await ctx.reply(`✅ Stopped agent "${name}".`)
+        await ctx.reply(`✅ ${cfg.past} agent "${name}".`)
       } catch (err: any) {
         const stderr = err?.stderr ? String(err.stderr).trim() : ''
-        await ctx.reply(`Failed to stop ${name}: ${stderr || (err instanceof Error ? err.message : String(err))}`)
+        await ctx.reply(`Failed to ${action} ${name}: ${stderr || (err instanceof Error ? err.message : String(err))}`)
       }
       return
     }
 
-    await ctx.reply(`Usage:\n/agents — list\n/agents stop <name> — stop an agent`)
+    await ctx.reply(
+      `Usage:\n` +
+      `/agents — list\n` +
+      `/agents start <name> — start an agent\n` +
+      `/agents stop <name> — stop an agent\n` +
+      `/agents restart <name> — restart an agent`,
+    )
   },
 
   // /clear — inject Claude Code's built-in `/clear` into the running TUI.

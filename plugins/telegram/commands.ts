@@ -61,7 +61,7 @@ export const COMMAND_REGISTRY: CommandDef[] = [
   },
   {
     name: 'agents',
-    description: 'List agents on this host (or `stop <name>` to stop one)',
+    description: 'List agents (or `start|stop|restart <name>` to control one)',
     scope: 'paired',
   },
   {
