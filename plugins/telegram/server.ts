@@ -585,7 +585,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Inbound arrives as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. Pass chat_id back to reply. If the tag has image_path, Read that path (a photo). If attachment_file_id, call download_attachment then Read the returned path. Set reply_to only when threading under an earlier message; omit it for normal latest-message replies.',
+      'Inbound arrives as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. Pass chat_id back to reply. If the inbound meta carries message_thread_id (forum-topic group like #5dive), pass it through to reply so your message lands in the same topic instead of the supergroup\'s General channel; omit when absent. If the tag has image_path, Read that path (a photo). If attachment_file_id, call download_attachment then Read the returned path. Set reply_to only when threading under an earlier message; omit it for normal latest-message replies.',
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
       '',
@@ -640,7 +640,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Telegram. Pass chat_id from the inbound message. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
+        'Reply on Telegram. Pass chat_id from the inbound message. Optionally pass reply_to (message_id) for threading under a specific message, message_thread_id for posting into a forum topic, and files (absolute paths) to attach images or documents.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -649,6 +649,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           reply_to: {
             type: 'string',
             description: 'Message ID to thread under. Use message_id from the inbound <channel> block.',
+          },
+          message_thread_id: {
+            type: 'string',
+            description: 'Forum topic id. Pass through verbatim from the inbound <channel> block when present, so the reply lands in the same topic instead of the supergroup\'s General channel. Omit if the inbound had none.',
           },
           files: {
             type: 'array',
@@ -717,6 +721,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const chat_id = args.chat_id as string
         const text = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
+        // Forum-topic routing. When the inbound came from a non-General topic
+        // in a supergroup, the agent passes message_thread_id through so the
+        // reply lands in the same thread (Telegram's `message_thread_id` send
+        // option). Omitted → reply goes to General (or the only thread, in
+        // a plain group / DM).
+        const message_thread_id = args.message_thread_id != null ? Number(args.message_thread_id) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const format = (args.format as string | undefined) ?? 'text'
         const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
@@ -747,6 +757,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               (replyMode === 'all' || i === 0)
             const sent = await bot.api.sendMessage(chat_id, chunks[i], {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
+              ...(message_thread_id != null ? { message_thread_id } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
             })
             rememberAnchor(chat_id, sent.message_id, chunks[i])
@@ -760,13 +771,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         }
 
         // Files go as separate messages (Telegram doesn't mix text+file in one
-        // sendMessage call). Thread under reply_to if present.
+        // sendMessage call). Thread under reply_to if present, and into the
+        // same forum topic when message_thread_id was passed.
         for (const f of files) {
           const ext = extname(f).toLowerCase()
           const input = new InputFile(f)
-          const opts = reply_to != null && replyMode !== 'off'
-            ? { reply_parameters: { message_id: reply_to } }
-            : undefined
+          const opts = {
+            ...(reply_to != null && replyMode !== 'off'
+              ? { reply_parameters: { message_id: reply_to } }
+              : {}),
+            ...(message_thread_id != null ? { message_thread_id } : {}),
+          }
           if (PHOTO_EXTS.has(ext)) {
             const sent = await bot.api.sendPhoto(chat_id, input, opts)
             sentIds.push(sent.message_id)
@@ -2056,6 +2071,11 @@ async function handleInbound(
   const from = ctx.from!
   const chat_id = String(ctx.chat!.id)
   const msgId = ctx.message?.message_id
+  // Forum-supergroup topic. Telegram sets message_thread_id on every message
+  // posted inside a non-General topic; absent for DMs, regular groups, and
+  // posts in a supergroup's General channel. Surfaced in inbound meta so the
+  // agent can thread its reply back into the same topic.
+  const threadId = ctx.message?.message_thread_id
 
   // Permission-reply intercept: if this looks like "yes xxxxx" for a
   // pending permission request, emit the structured event instead of
@@ -2106,6 +2126,7 @@ async function handleInbound(
       meta: {
         chat_id,
         ...(msgId != null ? { message_id: String(msgId) } : {}),
+        ...(threadId != null ? { message_thread_id: String(threadId) } : {}),
         user: from.username ?? String(from.id),
         user_id: String(from.id),
         ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),

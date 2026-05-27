@@ -25,6 +25,12 @@ Tracks the diff between `plugins/telegram/` and upstream
   task queue + agent org chart via `sudo -n 5dive task|org … --json`.
   `paired-5dive`-scoped (hidden + no-op on upstream-only hosts). Task titles
   are passed after `--` and `created_by` is the sender's Telegram @handle.
+- **Forum-topic capture on inbound + reply** — inbound `<channel>` meta now
+  carries `message_thread_id` when a message comes from a non-General topic
+  in a supergroup (e.g. a "#5dive" thread). The `reply` tool accepts a
+  matching `message_thread_id` arg that's passed through to Telegram's
+  sendMessage/sendPhoto/sendDocument, so replies land in the same topic
+  instead of falling back to the supergroup's General channel.
 - All slash commands are registered via `setMyCommands` so Telegram surfaces
   them in the autocomplete menu.
 
