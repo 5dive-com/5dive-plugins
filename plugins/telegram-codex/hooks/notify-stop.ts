@@ -31,6 +31,21 @@ if (process.env.CODEX_NOTIFY_DISABLED === '1') process.exit(0)
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'telegram')
+const LAST_REPLY_FILE = join(STATE_DIR, 'last-reply.stamp')
+
+// Duplicate-suppression: if Codex just sent a Telegram reply within the
+// window, the user already knows the turn finished — the Stop ping would
+// be noise. Window override via env (CODEX_NOTIFY_SUPPRESS_MS, range 0..600000).
+const SUPPRESS_MS = Math.max(0, Math.min(600_000,
+  Number(process.env.CODEX_NOTIFY_SUPPRESS_MS ?? 30_000)))
+if (SUPPRESS_MS > 0) {
+  try {
+    const lastTs = Number(readFileSync(LAST_REPLY_FILE, 'utf8'))
+    if (Number.isFinite(lastTs) && Date.now() - lastTs < SUPPRESS_MS) {
+      process.exit(0)
+    }
+  } catch {}
+}
 
 try {
   for (const line of readFileSync(join(STATE_DIR, '.env'), 'utf8').split('\n')) {

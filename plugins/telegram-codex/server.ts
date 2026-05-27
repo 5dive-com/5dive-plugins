@@ -31,7 +31,7 @@ import {
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 
-const PLUGIN_VERSION = '0.1.5'
+const PLUGIN_VERSION = '0.1.6'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'telegram')
@@ -40,6 +40,10 @@ const ENV_FILE = join(STATE_DIR, '.env')
 const PERMS_DIR = join(STATE_DIR, 'permissions')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
+// Touched on every successful `reply` tool call; the Stop hook reads its
+// mtime to suppress the "turn complete" ping when the user already got
+// the actual reply within the suppression window.
+const LAST_REPLY_FILE = join(STATE_DIR, 'last-reply.stamp')
 
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
@@ -774,6 +778,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             : await bot.api.sendDocument(chat_id, input, opts)
           sentIds.push(out.message_id)
         }
+
+        // Stamp for the Stop hook's duplicate-suppression check.
+        try { writeFileSync(LAST_REPLY_FILE, String(Date.now())) } catch {}
 
         const result = sentIds.length === 1
           ? `sent (id: ${sentIds[0]})`
