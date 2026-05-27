@@ -31,7 +31,7 @@ import {
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 
-const PLUGIN_VERSION = '0.1.10'
+const PLUGIN_VERSION = '0.1.11'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'telegram')
@@ -334,6 +334,7 @@ const BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: 'ping',    description: 'liveness check — replies with bot + plugin version' },
   { command: 'stop',    description: 'interrupt the current Codex turn (sends Ctrl-C to the pane)' },
   { command: 'restart', description: 'restart the Codex agent (systemd respawn brings it back in ~2s)' },
+  { command: 'agents',  description: 'list sibling 5dive agents on this host' },
 ]
 
 function helpText(): string {
@@ -406,6 +407,34 @@ async function interruptCodex(): Promise<string> {
   })
 }
 
+async function listAgents(): Promise<string> {
+  return new Promise(resolve => {
+    require('child_process').execFile('sudo',
+      ['-n', '5dive', 'agent', 'list', '--json'],
+      { timeout: 5000 },
+      (err: any, stdout: string) => {
+        if (err) return resolve(`⚠️ \`5dive agent list\` failed: ${err.message}`)
+        try {
+          const env = JSON.parse(stdout) as { ok: boolean; data: any[] }
+          if (!env.ok || !Array.isArray(env.data) || env.data.length === 0) {
+            return resolve('no agents found')
+          }
+          const self = agentName()
+          const lines = [`*agents on this host* (${env.data.length}):`, '']
+          for (const a of env.data) {
+            const me = a.name === self ? ' ← me' : ''
+            const dot = a.active === 'active' ? '🟢' : '⚪'
+            lines.push(`${dot} \`${a.name}\` — ${a.type}${a.channels && a.channels !== 'none' ? ` · ${a.channels}` : ''}${me}`)
+          }
+          resolve(lines.join('\n'))
+        } catch (e) {
+          resolve(`⚠️ couldn't parse \`5dive agent list\`: ${e}`)
+        }
+      },
+    )
+  })
+}
+
 async function restartAgent(name: string): Promise<void> {
   if (name === 'unknown') return
   await new Promise<void>(resolve => {
@@ -472,6 +501,14 @@ async function handleSlashCommand(ctx: Context, text: string): Promise<boolean> 
           ...(reply_to ? { reply_parameters: { message_id: reply_to } } : {}),
         }).catch(() => {})
         await restartAgent(name)
+        return true
+      }
+      case 'agents': {
+        const list = await listAgents()
+        await bot.api.sendMessage(chat_id, list, {
+          parse_mode: 'Markdown',
+          ...(reply_to ? { reply_parameters: { message_id: reply_to } } : {}),
+        })
         return true
       }
     }

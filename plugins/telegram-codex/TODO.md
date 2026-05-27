@@ -5,10 +5,6 @@ ordered by UX criticality unless noted.
 
 ## Up next
 
-- **v0.1.11 — `/agents` bot command.** List sibling agents on the host
-  via `5dive agent list --json`. Useful since multi-agent is the 5dive
-  story.
-
 ## v0.2 — configurable knobs
 
 - `access.json` fields the Claude build supports but we ignore today:
@@ -50,3 +46,5 @@ These don't translate to Codex's runtime, mentioned for completeness:
   territory).
 - v0.1.10 — `/stop` (tmux C-c) + `/restart` (`5dive agent restart`) bot
   commands.
+- v0.1.11 — `/agents` bot command (wraps `5dive agent list --json`,
+  marks self).

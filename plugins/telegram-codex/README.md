@@ -205,4 +205,5 @@ replies via the `reply` tool. Done.
 - v0.1.7 — typing indicator (re-sends `sendChatAction` every 4s between `wait_for_message` and `reply`, with a 5min ceiling) so a thinking Codex looks different from a hung one
 - v0.1.8 — silence watchdog `PreToolUse` hook — pings "🟡 still working — N tool calls in, Xs since last reply" when Codex has been silent past `CODEX_SILENCE_WATCHDOG_MS` (default 120000). Single ping per silence window — the hook resets its own clock so spam is impossible.
 - v0.1.9 — `Notification` hook relays error-flavored notifications (rate limit, API failure, timeout) to Telegram with a `⚠️ codex: …` prefix. Relay-all override via `CODEX_NOTIFY_RELAY_ALL=1`; disable via `CODEX_NOTIFY_RELAY_DISABLED=1`
-- v0.1.10 — `/stop` bot command sends Ctrl-C via tmux to interrupt the current Codex turn; `/restart` invokes `sudo 5dive agent restart <name>` so the systemd unit respawns the session in ~2s. Both gated on allowFrom. (this)
+- v0.1.10 — `/stop` bot command sends Ctrl-C via tmux to interrupt the current Codex turn; `/restart` invokes `sudo 5dive agent restart <name>` so the systemd unit respawns the session in ~2s. Both gated on allowFrom
+- v0.1.11 — `/agents` lists sibling 5dive agents on the host (active/inactive, type, channel, marks self). Wraps `sudo 5dive agent list --json`. (this)
