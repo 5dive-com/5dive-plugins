@@ -1,7 +1,7 @@
 {
   "name": "telegram",
   "description": "Telegram channel for Claude Code \u2014 messaging bridge with built-in access control, bundled lifecycle hooks (AskUserQuestion intercept, Stop-reply safety net), and a notify-user comms-playbook skill. Fork of Anthropic's telegram plugin, maintained by 5dive.",
-  "version": "0.4.21",
+  "version": "0.4.22",
   "author": {
     "name": "5dive",
     "email": "support@5dive.com"

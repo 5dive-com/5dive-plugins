@@ -1056,20 +1056,25 @@ function isActiveModel(alias: string, current: string | undefined): boolean {
   if (!current) return false
   return alias === current || MODEL_ALIASES[alias] === current
 }
-function modelKeyboard(current?: string): InlineKeyboard {
+// Combined /model picker: model row on top, effort rows below. Both knobs
+// configure the same "next turn runs as" question so we render them on one
+// keyboard — fewer slash commands to remember, one tap still acts. Effort
+// levels split 3 + 2 across two rows so the labels stay legible on mobile.
+function modelAndEffortKeyboard(
+  curModel?: string,
+  curEffort?: string,
+): InlineKeyboard {
   const kb = new InlineKeyboard()
   for (const alias of Object.keys(MODEL_ALIASES)) {
-    if (isActiveModel(alias, current)) kb.text(`✓ ${alias}`, 'model:noop')
+    if (isActiveModel(alias, curModel)) kb.text(`✓ ${alias}`, 'model:noop')
     else kb.text(alias, `model:${alias}`)
   }
-  return kb
-}
-function effortKeyboard(current?: string): InlineKeyboard {
-  const kb = new InlineKeyboard()
-  for (const level of EFFORT_LEVELS) {
-    if (level === current) kb.text(`✓ ${level}`, 'effort:noop')
+  kb.row()
+  EFFORT_LEVELS.forEach((level, i) => {
+    if (level === curEffort) kb.text(`✓ ${level}`, 'effort:noop')
     else kb.text(level, `effort:${level}`)
-  }
+    if (i === 2) kb.row()
+  })
   return kb
 }
 
@@ -1305,19 +1310,22 @@ const commandHandlers: Record<string, CommandHandler> = {
     }
   },
 
-  // /model — show or switch the model field in ~/.claude/settings.json. With
-  // no arg we just echo the current value alongside an inline-keyboard so the
-  // user taps instead of typing. With a text arg we still accept the alias
-  // (back-compat + scripting). Both paths route through applyModel().
-  // Claude Code accepts short aliases ("opus") and full IDs
-  // ("claude-opus-4-7") — we write the short form, easier to read.
+  // /model — show or switch the model+effort knobs in ~/.claude/settings.json.
+  // The no-arg path renders a combined picker (model row + effort rows) so
+  // both can be flipped from one command. Text-arg path (`/model opus`) is
+  // preserved for scripting/back-compat. Claude Code accepts short aliases
+  // ("opus") and full IDs ("claude-opus-4-7") — we write the short form.
   model: async ctx => {
     const arg = (ctx.match ?? '').trim()
     if (!arg) {
       const session = findActiveSession()
-      const cur = session ? readClaudeModelAndEffort(session.pid).model : undefined
-      await ctx.reply(`Current model: ${cur ?? '(unset — using default)'}`, {
-        reply_markup: modelKeyboard(cur),
+      const { model: curModel, effort: curEffort } = session
+        ? readClaudeModelAndEffort(session.pid)
+        : { model: undefined, effort: undefined }
+      const head =
+        `Model: ${curModel ?? '(default)'} · Effort: ${curEffort ?? '(default)'}`
+      await ctx.reply(head, {
+        reply_markup: modelAndEffortKeyboard(curModel, curEffort),
       })
       return
     }
@@ -1330,16 +1338,15 @@ const commandHandlers: Record<string, CommandHandler> = {
     r.after?.()
   },
 
-  // /effort — same shape as /model, different field. Claude Code stores the
-  // current reasoning effort under `effortLevel` in settings.json.
+  // /effort — hidden, text-arg only. The picker UX lives in /model now;
+  // this entry stays for scripting (`/effort high`) and so the BotFather
+  // dispatcher doesn't surface a "command unknown" for older muscle memory.
+  // Invoking with no arg redirects the user to /model rather than rendering
+  // a second picker.
   effort: async ctx => {
     const arg = (ctx.match ?? '').trim()
     if (!arg) {
-      const session = findActiveSession()
-      const cur = session ? readClaudeModelAndEffort(session.pid).effort : undefined
-      await ctx.reply(`Current effort: ${cur ?? '(unset — using default)'}`, {
-        reply_markup: effortKeyboard(cur),
-      })
+      await ctx.reply(`Effort picker moved into /model. Try /model.`)
       return
     }
     if (!(EFFORT_LEVELS as readonly string[]).includes(arg)) {

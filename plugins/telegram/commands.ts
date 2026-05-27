@@ -66,13 +66,17 @@ export const COMMAND_REGISTRY: CommandDef[] = [
   },
   {
     name: 'model',
-    description: 'Pick model',
+    description: 'Pick model + effort',
     scope: 'paired',
   },
   {
+    // Hidden, text-arg only (`/effort high`). The picker UX is part of
+    // /model now; the entry stays so the BotFather dispatcher still
+    // routes the slash for scripting / muscle memory.
     name: 'effort',
     description: 'Pick reasoning effort',
     scope: 'paired',
+    hidden: true,
   },
   {
     name: 'account',
