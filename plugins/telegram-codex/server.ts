@@ -31,7 +31,7 @@ import {
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 
-const PLUGIN_VERSION = '0.1.11'
+const PLUGIN_VERSION = '0.2.0'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'telegram')
@@ -100,6 +100,18 @@ type GroupPolicy = {
 type AccessJson = {
   allowFrom: string[]
   groups: Record<string, GroupPolicy>
+  // Optional emoji to react with on every inbound (👀, 👍, ❤, etc.).
+  // Default: empty — no ack reaction. Telegram only accepts emoji on
+  // its fixed whitelist; anything else gets silently dropped by the API.
+  ackReaction?: string
+  // Max chars per outbound message before chunking. Telegram caps at 4096;
+  // we leave headroom and default to 4000. Range [500, 4096].
+  textChunkLimit?: number
+  // "allowlist" (default) — only senders in allowFrom (DM) or groups (group)
+  //                        get through; everyone else is silently dropped.
+  // "static" — synonym of allowlist for now; reserved for parity with the
+  //            Claude build's static-mode semantics.
+  dmPolicy?: 'allowlist' | 'static'
 }
 
 const DEFAULT_ACCESS: AccessJson = { allowFrom: [], groups: {} }
@@ -111,6 +123,11 @@ function loadAccess(): AccessJson {
     return {
       allowFrom: parsed.allowFrom ?? [],
       groups: parsed.groups ?? {},
+      ackReaction: typeof parsed.ackReaction === 'string' ? parsed.ackReaction : undefined,
+      textChunkLimit: typeof parsed.textChunkLimit === 'number'
+        ? Math.max(500, Math.min(4096, parsed.textChunkLimit))
+        : undefined,
+      dmPolicy: parsed.dmPolicy === 'static' ? 'static' : 'allowlist',
     }
   } catch {
     return { ...DEFAULT_ACCESS }
@@ -541,6 +558,14 @@ async function ingest(
   const chat = ctx.chat!
   const msgId = ctx.message?.message_id
 
+  // Optional ack reaction (off by default). Fire-and-forget.
+  const ack = verdict.access.ackReaction
+  if (ack && msgId != null) {
+    void bot.api.setMessageReaction(String(chat.id), msgId, [
+      { type: 'emoji', emoji: ack as ReactionTypeEmoji['emoji'] },
+    ]).catch(() => {})
+  }
+
   const imagePath = downloadImage ? await downloadImage() : undefined
 
   enqueueInbound({
@@ -894,7 +919,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           }
         }
 
-        const chunks = chunkForTelegram(text)
+        const accessForReply = loadAccess()
+        const chunks = chunkForTelegram(text, accessForReply.textChunkLimit ?? TG_MAX_MESSAGE_CHARS)
         const sentIds: number[] = []
         try {
           for (let i = 0; i < chunks.length; i++) {

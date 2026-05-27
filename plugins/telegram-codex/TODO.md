@@ -5,13 +5,11 @@ ordered by UX criticality unless noted.
 
 ## Up next
 
-## v0.2 — configurable knobs
+## Still open
 
-- `access.json` fields the Claude build supports but we ignore today:
-  `ackReaction` (emoji on every inbound, user opts in), `textChunkLimit`
-  (currently hardcoded 4000), `dmPolicy` ("static" mode = no pairing
-  attempt for new users).
 - `notify-user` skill content (just a docs port of the comms playbook).
+- 5dive `--channels=telegram` codex provisioning (handed off to main).
+- ExecStopPost in 5dive's systemd unit for true crash-aware notification.
 
 ## Won't port
 
@@ -48,3 +46,5 @@ These don't translate to Codex's runtime, mentioned for completeness:
   commands.
 - v0.1.11 — `/agents` bot command (wraps `5dive agent list --json`,
   marks self).
+- v0.2.0 — configurable `access.json` knobs: `ackReaction`,
+  `textChunkLimit`, `dmPolicy`.
