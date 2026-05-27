@@ -7,7 +7,6 @@ ordered by UX criticality unless noted.
 
 ## Still open
 
-- `notify-user` skill content (just a docs port of the comms playbook).
 - 5dive `--channels=telegram` codex provisioning (handed off to main).
 - ExecStopPost in 5dive's systemd unit for true crash-aware notification.
 
@@ -48,3 +47,5 @@ These don't translate to Codex's runtime, mentioned for completeness:
   marks self).
 - v0.2.0 — configurable `access.json` knobs: `ackReaction`,
   `textChunkLimit`, `dmPolicy`.
+- v0.2.1 — `notify-user` SKILL.md ported from the Claude build,
+  adapted for Codex's `wait_for_message`/`reply` loop semantics.
