@@ -78,6 +78,23 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     scope: 'paired-5dive',
   },
   {
+    name: 'tasks',
+    description: 'List open tasks',
+    scope: 'paired-5dive',
+  },
+  {
+    // `/task add <title>` creates; bare `/task` prints usage. List lives at
+    // /tasks (mirrors the `5dive task ls` vs `add` split).
+    name: 'task',
+    description: 'Add a task — /task add <title>',
+    scope: 'paired-5dive',
+  },
+  {
+    name: 'org',
+    description: 'Show the agent org chart',
+    scope: 'paired-5dive',
+  },
+  {
     name: 'model',
     description: 'Pick model + effort',
     scope: 'paired',

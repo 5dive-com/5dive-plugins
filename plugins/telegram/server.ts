@@ -1574,6 +1574,101 @@ const commandHandlers: Record<string, CommandHandler> = {
     )
   },
 
+  // /tasks — list open tasks from the host-shared queue (`5dive task ls`).
+  // Read-only; mutations go through /task add (create) — status changes stay
+  // on the dashboard / CLI for now.
+  tasks: async ctx => {
+    try {
+      const { stdout } = await execFileP('sudo', ['-n', '5dive', 'task', 'ls', '--json'])
+      const j = JSON.parse(stdout)
+      if (!j.ok || !Array.isArray(j.data?.tasks)) {
+        await ctx.reply(`5dive returned unexpected output.`)
+        return
+      }
+      const tasks = j.data.tasks
+      if (tasks.length === 0) {
+        await ctx.reply(`No open tasks.\n\nAdd one with /task add <title>.`)
+        return
+      }
+      const lines = tasks.map((t: any) => {
+        const pri = t.priority && t.priority !== 'medium' ? ` (${t.priority})` : ''
+        const who = t.assignee ? ` · ${t.assignee}` : ''
+        return `• ${t.ident} [${t.status}]${pri} ${t.title}${who}`
+      })
+      await ctx.reply(`Open tasks:\n\n${lines.join('\n')}`)
+    } catch (err) {
+      await ctx.reply(`Failed to list tasks: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  },
+
+  // /task add <title> — create a task on the shared queue. Bare /task (or any
+  // non-`add` subcommand) prints usage. created_by is attributed to the
+  // Telegram sender's @handle. Title is passed after `--` so a leading dash
+  // isn't mistaken for a flag; --json is stripped globally by the CLI before
+  // dispatch so its position is harmless.
+  task: async ctx => {
+    const arg = (ctx.match ?? '').trim()
+    const sp = arg.indexOf(' ')
+    const sub = (sp === -1 ? arg : arg.slice(0, sp)).toLowerCase()
+    const title = sp === -1 ? '' : arg.slice(sp + 1).trim()
+    if (sub !== 'add') {
+      await ctx.reply(`Usage:\n/task add <title> — create a task\n/tasks — list open tasks`)
+      return
+    }
+    if (!title) {
+      await ctx.reply(`What's the task? Try:\n/task add Wire up the billing webhook`)
+      return
+    }
+    const from = ctx.from?.username || 'telegram'
+    try {
+      const { stdout } = await execFileP(
+        'sudo',
+        ['-n', '5dive', 'task', 'add', '--json', `--from=${from}`, '--', title],
+        { timeout: 8000 },
+      )
+      const j = JSON.parse(stdout)
+      if (!j.ok) {
+        await ctx.reply(`Failed: ${j.error?.message ?? 'unknown error'}`)
+        return
+      }
+      await ctx.reply(`✅ Created ${j.data.ident} — ${j.data.title}`)
+    } catch (err: any) {
+      const stderr = err?.stderr ? String(err.stderr).trim() : ''
+      await ctx.reply(`Failed to add task: ${stderr || (err instanceof Error ? err.message : String(err))}`)
+    }
+  },
+
+  // /org [tree] — print the agent org chart, indented by depth. Bare /org and
+  // /org tree both render it; anything else prints usage.
+  org: async ctx => {
+    const arg = (ctx.match ?? '').trim()
+    if (arg !== '' && arg !== 'tree') {
+      await ctx.reply(`Usage:\n/org tree — show the agent org chart`)
+      return
+    }
+    try {
+      const { stdout } = await execFileP('sudo', ['-n', '5dive', 'org', 'tree', '--json'])
+      const j = JSON.parse(stdout)
+      if (!j.ok || !Array.isArray(j.data?.tree)) {
+        await ctx.reply(`5dive returned unexpected output.`)
+        return
+      }
+      const tree = j.data.tree
+      if (tree.length === 0) {
+        await ctx.reply(`Org chart is empty.\n\nPlace agents with: sudo 5dive org set <agent> --manager=<agent>`)
+        return
+      }
+      const lines = tree.map((n: any) => {
+        const indent = '  '.repeat(Math.max(0, n.depth ?? 0))
+        const label = n.title || n.role ? ` — ${n.title || n.role}` : ''
+        return `${indent}${n.name}${label}`
+      })
+      await ctx.reply(`Org chart:\n\n${lines.join('\n')}`)
+    } catch (err) {
+      await ctx.reply(`Failed to read org chart: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  },
+
   // /clear — inject Claude Code's built-in `/clear` into the running TUI.
   // Lighter than /restart (no process kill, no systemd respawn delay): wipes
   // the session's context in-place. Matches Claude Code's own /clear

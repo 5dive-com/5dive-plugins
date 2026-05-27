@@ -21,8 +21,12 @@ Tracks the diff between `plugins/telegram/` and upstream
   `sudo -n 5dive agent list --json`. Marks "← you" against the agent owning
   the bot. Requires the agent user to have passwordless sudo for 5dive (the
   default on 5dive-managed hosts).
-- All five commands registered via `setMyCommands` so Telegram surfaces them
-  in the autocomplete menu.
+- **`/tasks`**, **`/task add <title>`**, **`/org`** — drive the host-shared
+  task queue + agent org chart via `sudo -n 5dive task|org … --json`.
+  `paired-5dive`-scoped (hidden + no-op on upstream-only hosts). Task titles
+  are passed after `--` and `created_by` is the sender's Telegram @handle.
+- All slash commands are registered via `setMyCommands` so Telegram surfaces
+  them in the autocomplete menu.
 
 ### Added — v0.1.0 carried over
 
