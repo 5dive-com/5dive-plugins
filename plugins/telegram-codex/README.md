@@ -198,4 +198,5 @@ replies via the `reply` tool. Done.
 - v0.1.0 — outbound + blocking inbound, preconfigured allowlist
 - v0.1.1 — `Stop` hook for "turn complete" Telegram ping
 - v0.1.2 — pairing CLI (`bun pair.ts`) for one-shot user-id capture
-- v0.1.3 — approval-mode bridge: `PermissionRequest` → Telegram buttons (this)
+- v0.1.3 — approval-mode bridge: `PermissionRequest` → Telegram buttons
+- v0.1.4 — bot slash commands (`/help`, `/status`, `/ping`) + setMyCommands menu; wait_for_message capped at 90s to stay inside Codex's MCP-call timeout (this)

@@ -8,8 +8,11 @@ back — anything you print to the terminal never reaches the user's phone.
 
 - **`wait_for_message`** — blocking. Returns the next user message as a
   `<telegram chat_id=... message_id=... user=... ts=...>…</telegram>` block.
-  Call this whenever you are idle and waiting for the user. Default
-  timeout 300s; on timeout it returns `<telegram timeout=true …/>`.
+  Call this whenever you are idle and waiting for the user. Default and
+  max `timeout_seconds` is 90 — Codex's MCP layer kills any tool call
+  that runs past ~120s, so asking for longer drops messages that arrive
+  near the boundary. On timeout returns `<telegram timeout=true …/>`;
+  loop and call again immediately. Idle polling is cheap.
 - **`reply`** — send a new message. Required: `chat_id`, `text`.
   Optional: `reply_to` (thread under an inbound message_id), `files`
   (absolute paths, max 50MB), `format` (`text` or `markdownv2`).
@@ -49,6 +52,23 @@ A typical turn looks like:
   rejects `chat_id` values outside its allowlist; trying to reply to
   arbitrary IDs returns an error. Always source `chat_id` from a prior
   `wait_for_message` result.
+
+## Default to replying via `reply`, not delegating
+
+You are the agent paired to this Telegram bot. By default, **answer
+Telegram messages with the `reply` tool in this MCP server** — the
+user is talking to *your* bot and expects *your* bot to answer.
+
+Acknowledgements like "you can talk now", "go ahead", "say something"
+are confirmations that the channel works — they are *not* implicit
+requests to involve another agent. Don't auto-delegate on those.
+
+Inter-agent handoff (e.g. via the `5dive-cli` skill if installed) is
+still appropriate when the *user* explicitly asks you to involve a
+sibling agent ("ask scout to take this", "hand off to marketing",
+"say hi to dev"). In those cases follow the skill's handoff pattern —
+pass chat context via `--reply-to-chat=<id> --reply-to-msg=<id>` so the
+target agent answers from its own bot.
 
 ## Security
 

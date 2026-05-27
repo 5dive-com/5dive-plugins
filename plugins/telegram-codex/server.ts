@@ -31,7 +31,7 @@ import {
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 
-const PLUGIN_VERSION = '0.1.3'
+const PLUGIN_VERSION = '0.1.4'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'telegram')
@@ -258,6 +258,99 @@ let shuttingDown = false
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'])
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
+// Tracked for /status — last time an inbound message landed (not the
+// startup time, not the last reply).
+let lastInboundTs: string | null = null
+
+// Bot-side slash commands. These short-circuit before ingest(), so they
+// never appear in the wait_for_message queue and Codex doesn't see them.
+//
+// Codex itself owns commands that need to manipulate its session (model
+// switching, stop, restart, checkpoint). Those would require IPC into the
+// running session and are out of scope here.
+const BOT_COMMANDS: Array<{ command: string; description: string }> = [
+  { command: 'help',   description: 'list bot commands and version' },
+  { command: 'status', description: 'show bridge health: token, allowlist, MCP server, last inbound' },
+  { command: 'ping',   description: 'liveness check — replies with bot + plugin version' },
+]
+
+function helpText(): string {
+  const lines = [
+    `*telegram-codex* v${PLUGIN_VERSION} — bridge for OpenAI Codex CLI`,
+    ``,
+    `commands:`,
+    ...BOT_COMMANDS.map(c => `  /${c.command} — ${c.description}`),
+    ``,
+    `everything else you send routes to Codex via wait_for_message.`,
+    `docs: github.com/5dive-com/5dive-plugins/tree/main/plugins/telegram-codex`,
+  ]
+  return lines.join('\n')
+}
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 1) return false
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+function statusText(): string {
+  const access = loadAccess()
+  let mcpPid = 0
+  try { mcpPid = parseInt(readFileSync(PID_FILE, 'utf8'), 10) } catch {}
+  const mcpAlive = pidAlive(mcpPid) && mcpPid === process.pid
+
+  const lines = [
+    `*telegram-codex* v${PLUGIN_VERSION}`,
+    ``,
+    `bot:        @${botUsername || '?'}`,
+    `MCP poller: ${mcpAlive ? `✅ alive (pid ${process.pid})` : '⚠️  pid mismatch / stale'}`,
+    `allowlist:  ${access.allowFrom.length} user(s), ${Object.keys(access.groups).length} group(s)`,
+    `last inbound: ${lastInboundTs ?? '(none this session)'}`,
+    ``,
+    `state dir:  \`${STATE_DIR}\``,
+  ]
+  return lines.join('\n')
+}
+
+// Returns true if this message was handled as a slash command (caller
+// should NOT enqueue it for Codex).
+async function handleSlashCommand(ctx: Context, text: string): Promise<boolean> {
+  // Match /<cmd> and /<cmd>@<botname> (group disambiguation).
+  const m = text.match(/^\/([a-z][a-z0-9_]*)(?:@([\w]+))?(?:\s|$)/i)
+  if (!m) return false
+  const cmd = m[1]!.toLowerCase()
+  const targetBot = m[2]?.toLowerCase()
+  if (targetBot && targetBot !== botUsername.toLowerCase()) return false
+  if (!BOT_COMMANDS.some(c => c.command === cmd)) return false
+
+  const chat_id = String(ctx.chat!.id)
+  const reply_to = ctx.message?.message_id
+
+  try {
+    switch (cmd) {
+      case 'help':
+        await bot.api.sendMessage(chat_id, helpText(), {
+          parse_mode: 'Markdown',
+          ...(reply_to ? { reply_parameters: { message_id: reply_to } } : {}),
+        })
+        return true
+      case 'status':
+        await bot.api.sendMessage(chat_id, statusText(), {
+          parse_mode: 'Markdown',
+          ...(reply_to ? { reply_parameters: { message_id: reply_to } } : {}),
+        })
+        return true
+      case 'ping':
+        await bot.api.sendMessage(chat_id, `pong — telegram-codex v${PLUGIN_VERSION}`, {
+          ...(reply_to ? { reply_parameters: { message_id: reply_to } } : {}),
+        })
+        return true
+    }
+  } catch (err) {
+    process.stderr.write(`telegram-codex: /${cmd} reply failed: ${err}\n`)
+  }
+  return true
+}
+
 function safeName(name: string | undefined): string | undefined {
   if (!name) return undefined
   // Strip path separators + nulls. Telegram-provided names are user-controlled.
@@ -272,6 +365,10 @@ async function ingest(
 ): Promise<void> {
   const verdict = gate(ctx)
   if (!verdict.allowed) return
+
+  if (await handleSlashCommand(ctx, text)) return
+
+  lastInboundTs = new Date().toISOString()
 
   const from = ctx.from!
   const chat = ctx.chat!
@@ -506,13 +603,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         + "Call this whenever you're idle waiting on user input — it replaces the "
         + "Codex CLI's normal stdin prompt for chats routed through this bot. "
         + "Returns a <telegram chat_id=... message_id=... user=...> block with the "
-        + "message body. Use the chat_id and message_id in subsequent reply/react calls.",
+        + "message body. Use the chat_id and message_id in subsequent reply/react calls. "
+        + "If no message arrives before the timeout, returns <telegram timeout=true/> — "
+        + "loop and call again immediately; idle polling is cheap.",
       inputSchema: {
         type: 'object',
         properties: {
           timeout_seconds: {
             type: 'number',
-            description: 'Max seconds to wait before returning {timeout: true}. Default 300, max 1800.',
+            description:
+              "Max seconds to wait before returning <telegram timeout=true/>. Default 90, max 90 — "
+              + "capped because Codex's MCP layer kills any tool call that runs past ~120s, "
+              + "which drops the inbound message that arrived right at the boundary. "
+              + "Loop and call again instead of asking for longer.",
           },
         },
       },
@@ -594,8 +697,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     switch (req.params.name) {
       case 'wait_for_message': {
-        const requested = Number(args.timeout_seconds ?? 300)
-        const seconds = Math.max(1, Math.min(1800, isFinite(requested) ? requested : 300))
+        const requested = Number(args.timeout_seconds ?? 90)
+        const seconds = Math.max(1, Math.min(90, isFinite(requested) ? requested : 90))
         const msg = await dequeueOrWait(seconds * 1000)
         if (!msg) {
           return { content: [{ type: 'text', text: `<telegram timeout=true seconds=${seconds}/>` }] }
@@ -709,6 +812,11 @@ void (async () => {
           attempt = 0
           botUsername = info.username
           process.stderr.write(`telegram-codex: polling as @${info.username}\n`)
+          // Register the bot command menu so the TG app surfaces /<cmd>
+          // suggestions. Failures are non-fatal — polling continues.
+          void bot.api.setMyCommands(BOT_COMMANDS).catch(err => {
+            process.stderr.write(`telegram-codex: setMyCommands failed: ${err}\n`)
+          })
         },
       })
       return
