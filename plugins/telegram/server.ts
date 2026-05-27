@@ -1255,7 +1255,17 @@ const commandHandlers: Record<string, CommandHandler> = {
       lines.push(`claude: v${session.version}`)
       lines.push(`plugin: v${PLUGIN_VERSION}`)
       const fiveDiveVersion = await read5diveVersion()
-      if (fiveDiveVersion) lines.push(`5dive: v${fiveDiveVersion}`)
+      if (fiveDiveVersion) {
+        lines.push(`5dive: v${fiveDiveVersion}`)
+        // Auth profile bound to this agent. Same source as the /account
+        // picker. Skip on non-5dive hosts (no agent registry to consult).
+        const me = thisAgentName()
+        if (me) {
+          const agents = await read5diveAgentList()
+          const account = agents?.find(a => a.name === me)?.authProfile || 'default'
+          lines.push(`account: ${account}`)
+        }
+      }
       lines.push(`workdir: ${session.cwd}`)
     }
     await ctx.reply(lines.join('\n'))
@@ -1618,7 +1628,14 @@ bot.on('callback_query:data', async ctx => {
   if (accountM) {
     const r = await applyAccount(accountM[1]!)
     await ctx.answerCallbackQuery({ text: r.after ? 'Switching…' : 'Failed' }).catch(() => {})
+    // Edit the picker message to clear the keyboard, then send a fresh reply
+    // so the user actually gets a push notification — editMessageText is silent.
+    // The fresh reply matters here because the CLI schedules a SIGTERM ~1s
+    // out and the user otherwise wouldn't know the switch landed.
     await ctx.editMessageText(r.text).catch(() => {})
+    if (r.after) {
+      await ctx.reply(r.text).catch(() => {})
+    }
     r.after?.()
     return
   }
