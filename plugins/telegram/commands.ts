@@ -60,6 +60,19 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     scope: 'paired',
   },
   {
+    // Save-only: pins the current session id. Paired with /resume, which
+    // relies on the 5dive launcher honoring a one-shot resume marker — so
+    // both are 5dive-scoped (hidden + dropped on upstream-only hosts).
+    name: 'checkpoint',
+    description: 'Save session to resume later',
+    scope: 'paired-5dive',
+  },
+  {
+    name: 'resume',
+    description: 'Resume the saved session',
+    scope: 'paired-5dive',
+  },
+  {
     name: 'agents',
     description: 'Team',
     scope: 'paired-5dive',

@@ -41,6 +41,15 @@ const APPROVED_DIR = join(STATE_DIR, 'approved')
 const ENV_FILE = join(STATE_DIR, '.env')
 const SILENCE_FILE = join(STATE_DIR, 'silence.json')
 const GOAL_FILE = join(STATE_DIR, 'goal.json')
+// /checkpoint bookkeeping: the saved session id + label. /resume reads this.
+const CHECKPOINT_FILE = join(STATE_DIR, 'checkpoint.json')
+// One-shot handoff to 5dive-agent-start: /resume writes the bare session id
+// here; the launcher reads it on the next unit start, adds `--resume <id>`
+// to the claude invocation, and deletes it. The launcher hardcodes the
+// DEFAULT path ($HOME/.claude/channels/telegram/resume-next), so a
+// TELEGRAM_STATE_DIR override (tests only) won't reach the real launcher —
+// intentional: resume is a production-runtime feature, not a test path.
+const RESUME_MARKER_FILE = join(STATE_DIR, 'resume-next')
 
 // Load ~/.claude/channels/telegram/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — this is where the token lives.
@@ -324,6 +333,41 @@ function writeGoal(g: GoalState): void {
   const tmp = GOAL_FILE + '.tmp'
   writeFileSync(tmp, JSON.stringify(g, null, 2) + '\n', { mode: 0o600 })
   renameSync(tmp, GOAL_FILE)
+}
+
+// /checkpoint state — the claude session the user pinned to continue later.
+// label is optional free text; savedAt is for the /checkpoint status line.
+type CheckpointState = {
+  sessionId: string
+  label?: string
+  savedAt: number
+}
+function readCheckpoint(): CheckpointState | null {
+  try {
+    const j = JSON.parse(readFileSync(CHECKPOINT_FILE, 'utf8')) as Partial<CheckpointState>
+    if (typeof j.sessionId !== 'string' || !j.sessionId) return null
+    return {
+      sessionId: j.sessionId,
+      label: typeof j.label === 'string' && j.label ? j.label : undefined,
+      savedAt: typeof j.savedAt === 'number' ? j.savedAt : 0,
+    }
+  } catch {
+    return null
+  }
+}
+function writeCheckpoint(c: CheckpointState): void {
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+  const tmp = CHECKPOINT_FILE + '.tmp'
+  writeFileSync(tmp, JSON.stringify(c, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, CHECKPOINT_FILE)
+}
+// Arm the one-shot resume marker the launcher consumes on next unit start.
+// Bare session id + newline keeps the launcher's bash parse trivial (no jq).
+function armResume(sessionId: string): void {
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+  const tmp = RESUME_MARKER_FILE + '.tmp'
+  writeFileSync(tmp, sessionId + '\n', { mode: 0o600 })
+  renameSync(tmp, RESUME_MARKER_FILE)
 }
 
 // Sticky-header anchors: every reply is remembered so subsequent
@@ -1323,6 +1367,77 @@ const commandHandlers: Record<string, CommandHandler> = {
     } catch (err) {
       await ctx.reply(`Failed to kill: ${err instanceof Error ? err.message : String(err)}`)
     }
+  },
+
+  // /checkpoint [label] — pin the current claude session so /resume can
+  // reload it later with full context. Save-only: never restarts. The label
+  // is optional free text echoed back on /resume. Overwrites any prior
+  // checkpoint (single slot — "the session I want to continue").
+  checkpoint: async ctx => {
+    const session = findActiveSession()
+    if (!session) {
+      await ctx.reply(`No active claude session to checkpoint.`)
+      return
+    }
+    const label = (ctx.match ?? '').trim() || undefined
+    try {
+      writeCheckpoint({ sessionId: session.sessionId, label, savedAt: Date.now() })
+    } catch (err) {
+      await ctx.reply(`Failed to save checkpoint: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+    const short = session.sessionId.slice(0, 8)
+    await ctx.reply(
+      `📌 Checkpoint saved${label ? `: ${label}` : ''}\n` +
+        `Session ${short}.\n\n` +
+        `Send /resume any time to restart this agent into that session with full context.`,
+    )
+  },
+
+  // /resume — restart the agent into the /checkpoint'd session via
+  // `claude --resume <id>`. Arms a one-shot marker that 5dive-agent-start
+  // consumes on the next unit start, then schedules a deferred restart so
+  // the confirmation reply lands before SIGTERM (same race lesson as
+  // /account — an inline restart kills this bot before the ack is sent).
+  resume: async ctx => {
+    const me = thisAgentName()
+    if (!me) {
+      await ctx.reply(`Can't determine this agent's name (not running as agent-* user).`)
+      return
+    }
+    const cp = readCheckpoint()
+    if (!cp) {
+      await ctx.reply(`No checkpoint saved. Use /checkpoint [label] first.`)
+      return
+    }
+    try {
+      armResume(cp.sessionId)
+    } catch (err) {
+      await ctx.reply(`Failed to arm resume: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+    const short = cp.sessionId.slice(0, 8)
+    const chatId = ctx.chat?.id ?? Number(ctx.from?.id)
+    await ctx.reply(
+      `▶ Resuming${cp.label ? ` "${cp.label}"` : ''} (session ${short})\n` +
+        `⚠️  Restarting in ~1s — full context will be back once the new session loads.`,
+    )
+    // Deferred restart: systemd-run fires ~1s later as a transient unit that
+    // survives this process's teardown, so the reply above is already on the
+    // wire. On failure no restart fires (bot stays alive) — correct the
+    // optimistic ack with a fresh reply.
+    void execFileP(
+      'sudo',
+      ['-n', 'systemd-run', '--on-active=1', '--collect',
+        '/bin/systemctl', 'restart', `5dive-agent@${me}.service`],
+      { timeout: 5000 },
+    ).catch((err: any) => {
+      const stderr = err?.stderr ? String(err.stderr).trim() : ''
+      void bot.api.sendMessage(
+        chatId,
+        `❌ Failed to restart for resume: ${stderr || (err instanceof Error ? err.message : String(err))}`,
+      ).catch(() => {})
+    })
   },
 
   // /model — show or switch the model+effort knobs in ~/.claude/settings.json.
