@@ -16,13 +16,20 @@
  *   - read last-reply.stamp (epoch ms) — touched on every successful
  *     `reply` and also by this hook when it pings, so a single ping
  *     resets the clock
- *   - if (now - stamp) > CODEX_SILENCE_WATCHDOG_MS (default 120s),
- *     send a quiet "⏳ still working…" ping to every allowFrom user,
- *     then touch the stamp so we don't ping again immediately
+ *   - if (now - stamp) > effective threshold, send a quiet "⏳ still
+ *     working…" ping to every allowFrom user, then touch the stamp so
+ *     we don't ping again immediately
+ *
+ * Backoff: the first ping in a silence stretch trips at the base
+ * CODEX_SILENCE_WATCHDOG_MS. Each subsequent ping in the SAME stretch
+ * needs much more additional silence — base × 10 for the 2nd, base × 15
+ * (cap) for the 3rd+. A real user-visible `reply` resets the count to 0.
+ * Goal: tell the user "still alive" once, early; then stay out of the
+ * way unless the silence drags on dramatically.
  *
  * Knobs:
  *   - CODEX_SILENCE_WATCHDOG_DISABLED=1  → bypass entirely
- *   - CODEX_SILENCE_WATCHDOG_MS=N        → threshold in ms (default 120000)
+ *   - CODEX_SILENCE_WATCHDOG_MS=N        → BASE threshold in ms (default 120000)
  *   - CODEX_SILENCE_TOOL_COUNT_FILE      → optional, ignored if absent
  *
  * The hook always exits 0 (continue=true) — silence-watchdog is a
@@ -44,34 +51,43 @@ const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'telegram')
 const LAST_REPLY_FILE = join(STATE_DIR, 'last-reply.stamp')
 const TOOL_COUNT_FILE = join(STATE_DIR, 'silence-tool-count')
+const PING_COUNT_FILE = join(STATE_DIR, 'silence-ping-count')
 
-const THRESHOLD_MS = Math.max(10_000, Math.min(3_600_000,
+const BASE_MS = Math.max(10_000, Math.min(3_600_000,
   Number(process.env.CODEX_SILENCE_WATCHDOG_MS ?? 120_000)))
 
-// Track tool calls since last user-visible reply. We still keep the
-// counter for the reset logic below — but we no longer include it in
-// the user-facing text. The telemetry-style "N tool calls in, Xs since
-// last reply" line read like debug output; a quiet "still working…"
-// carries the same signal without the noise.
+// Track tool calls + pings issued since last user-visible reply. The
+// tool-count counter feeds the reset-on-reply logic below; the ping
+// counter drives backoff so we don't spam the user every BASE seconds
+// during a long silent stretch.
 let toolCount = 0
+let pingCount = 0
 let lastReplyTs = 0
 try { lastReplyTs = Number(readFileSync(LAST_REPLY_FILE, 'utf8')) || 0 } catch {}
 try { toolCount = Number(readFileSync(TOOL_COUNT_FILE, 'utf8')) || 0 } catch {}
+try { pingCount = Number(readFileSync(PING_COUNT_FILE, 'utf8')) || 0 } catch {}
 
 // If the stamp moved forward since our last tool count snapshot, the
-// agent replied — reset the counter and exit.
+// agent replied — reset both counters and exit.
 let countStamp = 0
 try { countStamp = statSync(TOOL_COUNT_FILE).mtimeMs || 0 } catch {}
 if (lastReplyTs > countStamp) {
   try { writeFileSync(TOOL_COUNT_FILE, '0') } catch {}
+  try { writeFileSync(PING_COUNT_FILE, '0') } catch {}
   exitContinue()
 }
 
 toolCount += 1
 try { writeFileSync(TOOL_COUNT_FILE, String(toolCount)) } catch {}
 
+// Backoff multiplier: 1× base for the first ping per stretch, 10× for
+// the second, 15× (cap) for the third and beyond. So with the default
+// 120s base: ~2min, then +20min, then +30min, then +30min…
+const multiplier = pingCount === 0 ? 1 : Math.min(5 * (1 + pingCount), 15)
+const thresholdMs = BASE_MS * multiplier
+
 const elapsed = Date.now() - (lastReplyTs || Date.now())
-if (lastReplyTs === 0 || elapsed < THRESHOLD_MS) exitContinue()
+if (lastReplyTs === 0 || elapsed < thresholdMs) exitContinue()
 
 // Threshold tripped. Load access + token to send a ping.
 try {
@@ -100,8 +116,10 @@ await Promise.all(recipients.map(chat_id =>
 ))
 
 // Reset the silence-clock so we don't re-ping immediately, plus the
-// counter so the tool-count snapshot stays in sync with this ping.
+// tool-count snapshot. Bump the ping-count so the next ping in this
+// stretch needs much more silence (backoff).
 try { writeFileSync(LAST_REPLY_FILE, String(Date.now())) } catch {}
 try { writeFileSync(TOOL_COUNT_FILE, '0') } catch {}
+try { writeFileSync(PING_COUNT_FILE, String(pingCount + 1)) } catch {}
 
 exitContinue()

@@ -1,6 +1,6 @@
 {
   "name": "@5dive/telegram-codex-mcp",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "license": "Apache-2.0",
   "type": "module",
   "bin": "./server.ts",
