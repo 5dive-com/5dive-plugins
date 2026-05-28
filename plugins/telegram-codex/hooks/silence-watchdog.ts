@@ -3,6 +3,11 @@
  * Codex `PreToolUse` hook — pings the user if Codex has been working
  * silently for too long.
  *
+ * DISABLED BY DEFAULT (v0.2.6+). The notify-user skill teaches the
+ * agent to ack inbound work and edit-message progress updates, which
+ * carries the same "still alive" signal without unsolicited pings.
+ * Opt-in by setting `CODEX_SILENCE_WATCHDOG_ENABLED=1`.
+ *
  * Wire from ~/.codex/config.toml:
  *
  *   [[hooks.PreToolUse]]
@@ -28,7 +33,8 @@
  * way unless the silence drags on dramatically.
  *
  * Knobs:
- *   - CODEX_SILENCE_WATCHDOG_DISABLED=1  → bypass entirely
+ *   - CODEX_SILENCE_WATCHDOG_ENABLED=1   → opt-in (default off)
+ *   - CODEX_SILENCE_WATCHDOG_DISABLED=1  → bypass entirely (back-compat alias for the new default)
  *   - CODEX_SILENCE_WATCHDOG_MS=N        → BASE threshold in ms (default 600000 = 10 min)
  *   - CODEX_SILENCE_TOOL_COUNT_FILE      → optional, ignored if absent
  *
@@ -45,6 +51,7 @@ function exitContinue(): never {
   process.exit(0)
 }
 
+if (process.env.CODEX_SILENCE_WATCHDOG_ENABLED !== '1') exitContinue()
 if (process.env.CODEX_SILENCE_WATCHDOG_DISABLED === '1') exitContinue()
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR

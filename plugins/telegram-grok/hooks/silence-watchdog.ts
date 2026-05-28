@@ -3,6 +3,11 @@
  * Grok `PreToolUse` hook — pings the user if Grok has been working
  * silently for too long.
  *
+ * DISABLED BY DEFAULT (v0.1.5+). The notify-user skill teaches the
+ * agent to ack inbound work and edit-message progress updates, which
+ * carries the same "still alive" signal without unsolicited pings.
+ * Opt-in by setting `GROK_SILENCE_WATCHDOG_ENABLED=1`.
+ *
  * Wired by the plugin's hooks/hooks.json (PreToolUse event, no matcher =
  * every tool). Fires once per tool call. We:
  *   - read last-reply.stamp (epoch ms) — touched on every successful
@@ -20,7 +25,8 @@
  * way unless the silence drags on dramatically.
  *
  * Knobs:
- *   - GROK_SILENCE_WATCHDOG_DISABLED=1  → bypass entirely
+ *   - GROK_SILENCE_WATCHDOG_ENABLED=1   → opt-in (default off)
+ *   - GROK_SILENCE_WATCHDOG_DISABLED=1  → bypass entirely (back-compat alias for the new default)
  *   - GROK_SILENCE_WATCHDOG_MS=N        → BASE threshold in ms (default 600000 = 10 min)
  *
  * Always returns {"decision":"allow"} — silence-watchdog is a notification,
@@ -36,6 +42,7 @@ function exitContinue(): never {
   process.exit(0)
 }
 
+if (process.env.GROK_SILENCE_WATCHDOG_ENABLED !== '1') exitContinue()
 if (process.env.GROK_SILENCE_WATCHDOG_DISABLED === '1') exitContinue()
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR

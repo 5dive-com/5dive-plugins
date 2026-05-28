@@ -147,7 +147,7 @@ hooks are non-blocking and read the same state dir as the server:
 
 | Hook | Event | What it does | Knobs |
 | ---- | ----- | ------------ | ----- |
-| `silence-watchdog.ts` | `PreToolUse` | Pings a quiet `⏳ still working…` after `GROK_SILENCE_WATCHDOG_MS` (default 120s) of silence. Backs off in the same stretch — 1× / 10× / 15× cap — so long silent runs don't get a ping every 2 min | `GROK_SILENCE_WATCHDOG_DISABLED`, `GROK_SILENCE_WATCHDOG_MS` |
+| `silence-watchdog.ts` | `PreToolUse` | **Off by default** (v0.1.5+) — the notify-user skill carries the "still alive" signal via progress edits. Opt in with `GROK_SILENCE_WATCHDOG_ENABLED=1`. When enabled, pings `⏳ still working…` after `GROK_SILENCE_WATCHDOG_MS` (default 600s) of silence; backs off 1× / 10× / 15× cap so long silent runs don't ping every 10 min | `GROK_SILENCE_WATCHDOG_ENABLED`, `GROK_SILENCE_WATCHDOG_DISABLED`, `GROK_SILENCE_WATCHDOG_MS` |
 
 `PLUGIN_VERSION` (reported by `/ping`, `/status`, `setMyCommands`) is read from `package.json` at server startup, so PATCH bumps don't require a second edit in `server.ts`.
 | `notify-stop.ts` | `Stop` | "🟢 grok: turn complete" ping; suppressed if a reply was sent in the last 30s | `GROK_NOTIFY_DISABLED`, `GROK_NOTIFY_TEXT`, `GROK_NOTIFY_SUPPRESS_MS` |
