@@ -31,7 +31,12 @@ import {
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 
-const PLUGIN_VERSION = '0.1.0'
+const PLUGIN_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+    return String(pkg.version ?? 'unknown')
+  } catch { return 'unknown' }
+})()
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.GROK_HOME ?? join(homedir(), '.grok'), 'channels', 'telegram')
