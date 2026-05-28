@@ -1250,7 +1250,11 @@ function applyModel(alias: string): ApplyResult {
   }
   return {
     text: `✅ Model → ${alias} (sent /model to the running session)`,
-    after: () => proxyToClaudeTUI(`/model ${fullId}`),
+    // Claude Code shows a "Switch model?" confirmation menu when the active
+    // conversation is cached (the default for an in-use session). Without
+    // auto-confirm the TUI sits parked on that menu — the user can't see or
+    // dismiss it over Telegram, so the model never actually changes.
+    after: () => proxyToClaudeTUI(`/model ${fullId}`, /Switch model\?/),
   }
 }
 // Apply path for /account: shell out to `sudo -n 5dive agent set-account
@@ -1316,11 +1320,40 @@ function applyEffort(level: string): ApplyResult {
 // tmux session is named after its user ("agent-<name>:0"). Errors are
 // swallowed — if there's no tmux session, the settings.json edit we did
 // before this still ensures the next claude startup picks up the change.
-function proxyToClaudeTUI(line: string): void {
+//
+// autoConfirm: if set, after sending `line` we poll the pane for a few
+// seconds and press "1\n" when the regex matches. This is for TUI commands
+// that pop a confirmation menu the user can't dismiss over Telegram (e.g.
+// claude's "Switch model?" prompt that appears when the conversation is
+// cached and switching invalidates it). No-op when the menu never renders
+// (e.g. switching to the already-active model is a silent "Kept model as").
+function proxyToClaudeTUI(line: string, autoConfirm?: RegExp): void {
   const user = process.env.USER ?? process.env.LOGNAME ?? ''
   const target = user.startsWith('agent-') ? user : ''
   if (!target) return
-  execFileP('tmux', ['send-keys', '-t', `${target}:0`, line, 'Enter']).catch(() => {})
+  const paneTarget = `${target}:0`
+  execFileP('tmux', ['send-keys', '-t', paneTarget, line, 'Enter']).catch(() => {})
+  if (autoConfirm) void confirmMenuIfPresent(paneTarget, autoConfirm)
+}
+
+// Poll the pane up to ~5s for a confirmation menu and press "1\n" on hit.
+// Used by proxyToClaudeTUI's autoConfirm. Silent on miss — the menu may
+// legitimately not appear (same-model switch, etc.).
+async function confirmMenuIfPresent(paneTarget: string, re: RegExp): Promise<void> {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    try {
+      const { stdout } = await execFileP('tmux', ['capture-pane', '-t', paneTarget, '-p'])
+      if (re.test(stdout)) {
+        await execFileP('tmux', ['send-keys', '-t', paneTarget, '1', 'Enter']).catch(() => {})
+        return
+      }
+    } catch {
+      /* tmux gone — give up */
+      return
+    }
+    await new Promise((r) => setTimeout(r, 250))
+  }
 }
 
 function formatDuration(ms: number): string {
