@@ -29,7 +29,7 @@
  *
  * Knobs:
  *   - CODEX_SILENCE_WATCHDOG_DISABLED=1  → bypass entirely
- *   - CODEX_SILENCE_WATCHDOG_MS=N        → BASE threshold in ms (default 120000)
+ *   - CODEX_SILENCE_WATCHDOG_MS=N        → BASE threshold in ms (default 600000 = 10 min)
  *   - CODEX_SILENCE_TOOL_COUNT_FILE      → optional, ignored if absent
  *
  * The hook always exits 0 (continue=true) — silence-watchdog is a
@@ -54,7 +54,7 @@ const TOOL_COUNT_FILE = join(STATE_DIR, 'silence-tool-count')
 const PING_COUNT_FILE = join(STATE_DIR, 'silence-ping-count')
 
 const BASE_MS = Math.max(10_000, Math.min(3_600_000,
-  Number(process.env.CODEX_SILENCE_WATCHDOG_MS ?? 120_000)))
+  Number(process.env.CODEX_SILENCE_WATCHDOG_MS ?? 600_000)))
 
 // Track tool calls + pings issued since last user-visible reply. The
 // tool-count counter feeds the reset-on-reply logic below; the ping
