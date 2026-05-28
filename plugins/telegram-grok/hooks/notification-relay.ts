@@ -51,9 +51,35 @@ function extractText(p: any): string {
   return raw.length > 500 ? raw.slice(0, 500) + '…' : raw
 }
 
+// Grok sometimes hands us a `Debug`-formatted Rust struct (e.g. the full
+// `SessionNotification { ... update: RetryState(Retrying { ... reason: "..." }) ... }`
+// dump). When that happens, surface just the human-readable `reason` field
+// instead of the raw struct soup — the rest is internal session bookkeeping
+// the user can't act on.
+function cleanRustDebug(raw: string): string {
+  if (!raw.includes('SessionNotification') && !raw.includes('Retrying') && !raw.includes('RetryState')) return raw
+  const m = raw.match(/reason:\s*"((?:\\.|[^"\\])*)"/)
+  if (m) {
+    const reason = m[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim()
+    // Strip the giant header-dump suffix some upstream errors carry.
+    const cut = reason.split(/\n|Response headers:|Request URL:/)[0].trim()
+    return cut.length > 0 ? cut : reason.slice(0, 300)
+  }
+  return raw
+}
+
+// RetryState is grok's own retry machinery announcing an in-flight retry.
+// It resolves on its own (or escalates to a real error later), so spamming
+// the user mid-retry is noise. Drop these entirely.
+function isTransientRetry(raw: string): boolean {
+  return /\bRetryState\b|\bRetrying\b/.test(raw)
+}
+
 const ERROR_RE = /\b(error|failed|failure|crash|panic|timeout|rate.?limit|usage.?limit|unauthor|denied|forbidden|exceed)/i
-const text = extractText(payload)
+const rawText = extractText(payload)
 const relayAll = process.env.GROK_NOTIFY_RELAY_ALL === '1'
+if (!relayAll && isTransientRetry(rawText)) exitContinue()
+const text = cleanRustDebug(rawText)
 if (!relayAll && !ERROR_RE.test(text)) exitContinue()
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR

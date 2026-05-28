@@ -9,9 +9,8 @@
  *     `reply` and also by this hook when it pings, so a single ping
  *     resets the clock
  *   - if (now - stamp) > GROK_SILENCE_WATCHDOG_MS (default 120s),
- *     send a "🟡 still working — N tool calls since last reply" ping
- *     to every allowFrom user, then touch the stamp so we don't ping
- *     again immediately
+ *     send a quiet "⏳ still working…" ping to every allowFrom user,
+ *     then touch the stamp so we don't ping again immediately
  *
  * Knobs:
  *   - GROK_SILENCE_WATCHDOG_DISABLED=1  → bypass entirely
@@ -40,9 +39,11 @@ const TOOL_COUNT_FILE = join(STATE_DIR, 'silence-tool-count')
 const THRESHOLD_MS = Math.max(10_000, Math.min(3_600_000,
   Number(process.env.GROK_SILENCE_WATCHDOG_MS ?? 120_000)))
 
-// Track how many tool calls have happened since the last user-visible
-// reply. The number is what makes the silence ping useful — "5 tool
-// calls in" is meaningful, "still working" alone is not.
+// Track tool calls since last user-visible reply. We still keep the
+// counter for the reset logic below — but we no longer include it in
+// the user-facing text. The telemetry-style "N tool calls in, Xs since
+// last reply" line read like debug output; a quiet "still working…"
+// carries the same signal without the noise.
 let toolCount = 0
 let lastReplyTs = 0
 try { lastReplyTs = Number(readFileSync(LAST_REPLY_FILE, 'utf8')) || 0 } catch {}
@@ -79,8 +80,7 @@ try { access = JSON.parse(readFileSync(join(STATE_DIR, 'access.json'), 'utf8')) 
 const recipients = access.allowFrom ?? []
 if (recipients.length === 0) exitContinue()
 
-const secs = Math.round(elapsed / 1000)
-const text = `🟡 still working — ${toolCount} tool call${toolCount === 1 ? '' : 's'} in, ${secs}s since last reply`
+const text = `⏳ still working…`
 
 await Promise.all(recipients.map(chat_id =>
   fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
@@ -90,9 +90,8 @@ await Promise.all(recipients.map(chat_id =>
   }).catch(() => {})
 ))
 
-// Reset the silence-clock so we don't re-ping immediately — and the
-// counter so the next "still working" ping reflects work done since
-// THIS ping, not since the last actual reply.
+// Reset the silence-clock so we don't re-ping immediately, plus the
+// counter so the tool-count snapshot stays in sync with this ping.
 try { writeFileSync(LAST_REPLY_FILE, String(Date.now())) } catch {}
 try { writeFileSync(TOOL_COUNT_FILE, '0') } catch {}
 

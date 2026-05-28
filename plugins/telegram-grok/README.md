@@ -147,7 +147,7 @@ hooks are non-blocking and read the same state dir as the server:
 
 | Hook | Event | What it does | Knobs |
 | ---- | ----- | ------------ | ----- |
-| `silence-watchdog.ts` | `PreToolUse` | Pings "🟡 still working — N tool calls in, Xs since last reply" after `GROK_SILENCE_WATCHDOG_MS` (default 120s) of silence | `GROK_SILENCE_WATCHDOG_DISABLED`, `GROK_SILENCE_WATCHDOG_MS` |
+| `silence-watchdog.ts` | `PreToolUse` | Pings a quiet `⏳ still working…` after `GROK_SILENCE_WATCHDOG_MS` (default 120s) of silence | `GROK_SILENCE_WATCHDOG_DISABLED`, `GROK_SILENCE_WATCHDOG_MS` |
 | `notify-stop.ts` | `Stop` | "🟢 grok: turn complete" ping; suppressed if a reply was sent in the last 30s | `GROK_NOTIFY_DISABLED`, `GROK_NOTIFY_TEXT`, `GROK_NOTIFY_SUPPRESS_MS` |
 | `notification-relay.ts` | `Notification` | Relays error-flavored notifications (rate limit, API error, crash) with a `⚠️ grok:` prefix | `GROK_NOTIFY_RELAY_ALL`, `GROK_NOTIFY_RELAY_DISABLED` |
 
