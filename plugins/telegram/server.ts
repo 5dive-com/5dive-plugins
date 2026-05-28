@@ -1228,6 +1228,14 @@ function applyModel(alias: string): ApplyResult {
   if (!(alias in MODEL_ALIASES)) {
     return { text: `Unknown model "${alias}".` }
   }
+  // We persist the alias (e.g. "opus[1m]") because that's what isActiveModel
+  // matches against on the next render. But the TUI /model command only
+  // accepts known aliases ("opus", "sonnet", "haiku", "default") or full
+  // model IDs — "opus[1m]" isn't on the alias list claude knows, so send the
+  // resolved full ID instead (e.g. "claude-opus-4-7[1m]"). Claude accepts
+  // either shape, so this also works for the plain variants ("opus" →
+  // "claude-opus-4-7").
+  const fullId = MODEL_ALIASES[alias]!
   try {
     patchSettings({ model: alias })
   } catch (err) {
@@ -1235,7 +1243,7 @@ function applyModel(alias: string): ApplyResult {
   }
   return {
     text: `✅ Model → ${alias} (sent /model to the running session)`,
-    after: () => proxyToClaudeTUI(`/model ${alias}`),
+    after: () => proxyToClaudeTUI(`/model ${fullId}`),
   }
 }
 // Apply path for /account: shell out to `sudo -n 5dive agent set-account

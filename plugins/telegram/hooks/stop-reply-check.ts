@@ -39,7 +39,9 @@ import { readEntries, analyzeTurn, hadTelegramToolCallAfter } from './lib/transc
 import { sendMessage, getToken } from './lib/telegram'
 import { emitBlock } from './lib/output'
 import { TG_TOOL_PREFIX } from './lib/paths'
-import type { HookPayload } from './lib/types'
+import { getAllowedChatIds, getCallerChatId } from './lib/access'
+import { parseResetEpoch } from './lib/time'
+import type { HookPayload, TranscriptEntry, TranscriptContentBlock } from './lib/types'
 
 const payload = await readPayload<HookPayload>()
 
@@ -65,6 +67,85 @@ if (existsSync(lockFile)) {
 }
 
 const entries = readEntries(transcriptPath)
+
+// Session-limit notice: claude renders the 5h-window / weekly-Max limit as a
+// regular assistant message with isApiErrorMessage=true (stop_reason=
+// stop_sequence — a graceful turn end, NOT an API error), so StopFailure
+// never fires for it and stopfailure-notify.ts is unreachable. Without this
+// check, the user sees the agent go silent for hours with no Telegram ping.
+//
+// Scope:
+//   - independent of the "missed Telegram reply" logic below (a turn can both
+//     contain a successful reply AND end with the limit notice);
+//   - dedupe by transcript entry uuid via sentinel /tmp/5dive-tg-sessionlimit-
+//     <sha1(transcript_path)>.uuid so we DM once per limit episode, not on
+//     every subsequent Stop;
+//   - look at the last few assistant entries only (the limit notice is always
+//     at the tail of the latest turn — older episodes shouldn't re-fire).
+const SESSION_LIMIT_LOOKBACK = 6
+const SESSION_LIMIT_RE = /session.*limit|hit your.*limit|reached your.*limit|usage limit/i
+
+function findSessionLimitEntry(entries: TranscriptEntry[]): { entry: TranscriptEntry; text: string } | null {
+  const from = Math.max(0, entries.length - SESSION_LIMIT_LOOKBACK)
+  for (let i = entries.length - 1; i >= from; i--) {
+    const e = entries[i]
+    if (e.type !== 'assistant' || !e.isApiErrorMessage) continue
+    const content = e.message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content as TranscriptContentBlock[]) {
+      if (block.type === 'text' && typeof block.text === 'string' && SESSION_LIMIT_RE.test(block.text)) {
+        return { entry: e, text: block.text }
+      }
+    }
+  }
+  return null
+}
+
+const sessionLimitHit = findSessionLimitEntry(entries)
+if (sessionLimitHit && getToken()) {
+  const sentinelFile = join(tmpdir(), `5dive-tg-sessionlimit-${lockKey}.uuid`)
+  const lastSeenUuid = (() => {
+    try { return readFileSync(sentinelFile, 'utf8').trim() } catch { return '' }
+  })()
+  const thisUuid = (sessionLimitHit.entry as TranscriptEntry & { uuid?: string }).uuid ?? ''
+  if (thisUuid && thisUuid !== lastSeenUuid) {
+    // Find a chat: prefer the inbound chat from this turn (caller scoping),
+    // else fall back to every allowed chat so an autonomous-turn limit hit
+    // still pings someone.
+    const callerChat = getCallerChatId(entries)
+    const chatIds = callerChat ? [callerChat] : getAllowedChatIds()
+    if (chatIds.length > 0) {
+      // Compose the DM. Add a parsed time-left when the message carries a
+      // reset clue ("resets 9am" / "in 2h"), so the user knows when to expect
+      // the agent back; silent fallback if we can't parse one.
+      const resetEpoch = parseResetEpoch(sessionLimitHit.text)
+      let timeLeft = ''
+      if (resetEpoch !== null) {
+        const delta = resetEpoch - Math.floor(Date.now() / 1000)
+        if (delta <= 0) timeLeft = ' — resumes any moment now.'
+        else if (delta < 60) timeLeft = ` — resumes in ${delta}s.`
+        else if (delta < 3600) timeLeft = ` — resumes in ${Math.floor(delta / 60)}m.`
+        else {
+          const h = Math.floor(delta / 3600)
+          const m = Math.floor((delta % 3600) / 60)
+          timeLeft = m === 0 ? ` — resumes in ${h}h.` : ` — resumes in ${h}h ${m}m.`
+        }
+      }
+      const dm = `⚠️ Session limit hit: ${sessionLimitHit.text.trim()}${timeLeft}`
+      // Write sentinel BEFORE sending so a concurrent Stop can't race a
+      // duplicate DM through. sendMessage is best-effort; a failed network
+      // call still consumes the dedupe slot — that matches our pattern
+      // elsewhere (one alert per episode, no auto-retry on transient
+      // failure).
+      try {
+        writeFileSync(sentinelFile, thisUuid)
+      } catch {
+        // ignore — at worst we send the DM twice on next Stop
+      }
+      await Promise.all(chatIds.map(cid => sendMessage(cid, dm)))
+    }
+  }
+}
 
 // Re-entry path: harness flagged stop_hook_active. We blocked the previous
 // Stop; now decide whether to send a diagnostic.
