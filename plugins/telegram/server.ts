@@ -1231,30 +1231,40 @@ function accountKeyboard(names: string[], current: string): InlineKeyboard {
 // so the user saw the original keyboard still attached — now we await
 // Telegram I/O first, then fire the action.
 type ApplyResult = { text: string; after?: () => void }
-function applyModel(alias: string): ApplyResult {
+function applyModel(alias: string, chatId: number): ApplyResult {
   if (!(alias in MODEL_ALIASES)) {
     return { text: `Unknown model "${alias}".` }
   }
-  // We persist the alias (e.g. "opus[1m]") because that's what isActiveModel
-  // matches against on the next render. But the TUI /model command only
-  // accepts known aliases ("opus", "sonnet", "haiku", "default") or full
-  // model IDs — "opus[1m]" isn't on the alias list claude knows, so send the
-  // resolved full ID instead (e.g. "claude-opus-4-7[1m]"). Claude accepts
-  // either shape, so this also works for the plain variants ("opus" →
-  // "claude-opus-4-7").
-  const fullId = MODEL_ALIASES[alias]!
+  const me = thisAgentName()
+  if (!me) return { text: `Can't determine this agent's name (not running as agent-* user).` }
   try {
     patchSettings({ model: alias })
   } catch (err) {
     return { text: `Failed to update settings.json: ${err instanceof Error ? err.message : String(err)}` }
   }
   return {
-    text: `✅ Model → ${alias} (sent /model to the running session)`,
-    // Claude Code shows a "Switch model?" confirmation menu when the active
-    // conversation is cached (the default for an in-use session). Without
-    // auto-confirm the TUI sits parked on that menu — the user can't see or
-    // dismiss it over Telegram, so the model never actually changes.
-    after: () => proxyToClaudeTUI(`/model ${fullId}`, /Switch model\?/),
+    text: `✅ Model → ${alias}\n\n⚠️  Claude is restarting in ~1s so the new model takes effect.`,
+    // Mirror applyAccount: deferred systemd-run restart fires ~1s later as a
+    // transient unit that survives this process's teardown, so the ack above
+    // is on the wire first. The previous design tried to flip the model live
+    // via `tmux send-keys /model <id>` plus a Switch-model? auto-confirm, but
+    // that proved unreliable — the running TUI sometimes ignored the menu or
+    // the menu never rendered, leaving settings.json correct but the live
+    // process running the old model. Restarting picks up settings.json cleanly.
+    after: () => {
+      void execFileP(
+        'sudo',
+        ['-n', 'systemd-run', '--on-active=1', '--collect',
+          '/bin/systemctl', 'restart', `5dive-agent@${me}.service`],
+        { timeout: 5000 },
+      ).catch((err: any) => {
+        const stderr = err?.stderr ? String(err.stderr).trim() : ''
+        void bot.api.sendMessage(
+          chatId,
+          `❌ Failed to restart for model change: ${stderr || (err instanceof Error ? err.message : String(err))}`,
+        ).catch(() => {})
+      })
+    },
   }
 }
 // Apply path for /account: shell out to `sudo -n 5dive agent set-account
@@ -1301,18 +1311,35 @@ async function applyAccount(name: string, chatId: number): Promise<ApplyResult> 
   }
 }
 
-function applyEffort(level: string): ApplyResult {
+function applyEffort(level: string, chatId: number): ApplyResult {
   if (!(EFFORT_LEVELS as readonly string[]).includes(level)) {
     return { text: `Unknown effort "${level}".` }
   }
+  const me = thisAgentName()
+  if (!me) return { text: `Can't determine this agent's name (not running as agent-* user).` }
   try {
     patchSettings({ effortLevel: level })
   } catch (err) {
     return { text: `Failed to update settings.json: ${err instanceof Error ? err.message : String(err)}` }
   }
   return {
-    text: `✅ Effort → ${level} (sent /effort to the running session)`,
-    after: () => proxyToClaudeTUI(`/effort ${level}`),
+    text: `✅ Effort → ${level}\n\n⚠️  Claude is restarting in ~1s so the new effort takes effect.`,
+    // Same shape as applyModel — see comment there. Live-flipping effort via
+    // tmux send-keys was unreliable; deferred restart is the source of truth.
+    after: () => {
+      void execFileP(
+        'sudo',
+        ['-n', 'systemd-run', '--on-active=1', '--collect',
+          '/bin/systemctl', 'restart', `5dive-agent@${me}.service`],
+        { timeout: 5000 },
+      ).catch((err: any) => {
+        const stderr = err?.stderr ? String(err.stderr).trim() : ''
+        void bot.api.sendMessage(
+          chatId,
+          `❌ Failed to restart for effort change: ${stderr || (err instanceof Error ? err.message : String(err))}`,
+        ).catch(() => {})
+      })
+    },
   }
 }
 // Send a slash command into the running claude TUI by typing it into the
@@ -1681,7 +1708,8 @@ const commandHandlers: Record<string, CommandHandler> = {
       await ctx.reply(`Unknown model "${arg}". Try: /model ${Object.keys(MODEL_ALIASES).join(' | ')}`)
       return
     }
-    const r = applyModel(arg)
+    const chatId = ctx.chat?.id ?? Number(ctx.from?.id)
+    const r = applyModel(arg, chatId)
     await ctx.reply(r.text)
     r.after?.()
   },
@@ -1701,7 +1729,8 @@ const commandHandlers: Record<string, CommandHandler> = {
       await ctx.reply(`Unknown effort "${arg}". Try: /effort ${EFFORT_LEVELS.join(' | ')}`)
       return
     }
-    const r = applyEffort(arg)
+    const chatId = ctx.chat?.id ?? Number(ctx.from?.id)
+    const r = applyEffort(arg, chatId)
     await ctx.reply(r.text)
     r.after?.()
   },
@@ -2050,22 +2079,32 @@ bot.on('callback_query:data', async ctx => {
   // character class doesn't widen what actually executes.
   const modelM = /^model:([a-z0-9\-[\]]+)$/.exec(data)
   if (modelM) {
-    const r = applyModel(modelM[1]!)
+    const chatId = ctx.chat?.id ?? Number(ctx.callbackQuery.from.id)
+    const r = applyModel(modelM[1]!, chatId)
     // answerCallbackQuery dismisses the spinner Telegram shows after a tap;
     // its text appears as a transient toast above the message. editMessageText
     // replaces the original message body and strips the keyboard so the
     // same option can't be tapped twice. We await both BEFORE scheduling
-    // the SIGTERM so the user actually sees the confirmation.
+    // the SIGTERM so the user actually sees the confirmation. A fresh reply
+    // follows so the user gets a push (editMessageText is silent) before the
+    // restart timer fires.
     await ctx.answerCallbackQuery({ text: r.after ? 'Switching…' : 'Failed' }).catch(() => {})
     await ctx.editMessageText(r.text).catch(() => {})
+    if (r.after) {
+      await ctx.reply(r.text).catch(() => {})
+    }
     r.after?.()
     return
   }
   const effortM = /^effort:([a-z]+)$/.exec(data)
   if (effortM) {
-    const r = applyEffort(effortM[1]!)
+    const chatId = ctx.chat?.id ?? Number(ctx.callbackQuery.from.id)
+    const r = applyEffort(effortM[1]!, chatId)
     await ctx.answerCallbackQuery({ text: r.after ? 'Switching…' : 'Failed' }).catch(() => {})
     await ctx.editMessageText(r.text).catch(() => {})
+    if (r.after) {
+      await ctx.reply(r.text).catch(() => {})
+    }
     r.after?.()
     return
   }
