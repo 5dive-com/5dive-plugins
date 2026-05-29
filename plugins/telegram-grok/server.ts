@@ -48,6 +48,11 @@ const PID_FILE = join(STATE_DIR, 'bot.pid')
 // mtime to suppress the "turn complete" ping when the user already got
 // the actual reply within the suppression window.
 const LAST_REPLY_FILE = join(STATE_DIR, 'last-reply.stamp')
+// Stamped each time wait_for_message hands the agent a real inbound. The Stop
+// hook compares this against last-reply.stamp: it only pings "turn complete"
+// when an inbound arrived that wasn't replied to, so the idle wait_for_message
+// loop (which finishes a turn every few minutes with no real work) stays silent.
+const LAST_INBOUND_FILE = join(STATE_DIR, 'last-inbound.stamp')
 
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
@@ -781,6 +786,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // Grok now has a message to work on — keep "typing…" visible until
         // it sends `reply` (or the 5min ceiling).
         startTypingLoop(msg.chat_id)
+        try { writeFileSync(LAST_INBOUND_FILE, String(Date.now())) } catch {}
         return { content: [{ type: 'text', text: formatInbound(msg) }] }
       }
 

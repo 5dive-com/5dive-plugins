@@ -32,20 +32,21 @@ if (process.env.CODEX_NOTIFY_DISABLED === '1') process.exit(0)
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'telegram')
 const LAST_REPLY_FILE = join(STATE_DIR, 'last-reply.stamp')
+const LAST_INBOUND_FILE = join(STATE_DIR, 'last-inbound.stamp')
 
-// Duplicate-suppression: if Codex just sent a Telegram reply within the
-// window, the user already knows the turn finished — the Stop ping would
-// be noise. Window override via env (CODEX_NOTIFY_SUPPRESS_MS, range 0..600000).
-const SUPPRESS_MS = Math.max(0, Math.min(600_000,
-  Number(process.env.CODEX_NOTIFY_SUPPRESS_MS ?? 30_000)))
-if (SUPPRESS_MS > 0) {
-  try {
-    const lastTs = Number(readFileSync(LAST_REPLY_FILE, 'utf8'))
-    if (Number.isFinite(lastTs) && Date.now() - lastTs < SUPPRESS_MS) {
-      process.exit(0)
-    }
-  } catch {}
-}
+// Only ping when the just-finished turn left a real inbound unanswered.
+// server.ts stamps last-inbound.stamp whenever wait_for_message hands the agent
+// a real message, and last-reply.stamp whenever it replies. If the agent already
+// replied to the latest inbound (lastReply >= lastInbound) the user saw the
+// answer; if no inbound arrived at all, the turn was just an idle
+// wait_for_message loop iteration. Either way a "turn complete" ping is noise —
+// only the genuine "did work but didn't reply" case (lastInbound > lastReply)
+// is worth a nudge.
+let lastReply = 0
+let lastInbound = 0
+try { lastReply = Number(readFileSync(LAST_REPLY_FILE, 'utf8')) || 0 } catch {}
+try { lastInbound = Number(readFileSync(LAST_INBOUND_FILE, 'utf8')) || 0 } catch {}
+if (lastReply >= lastInbound) process.exit(0)
 
 try {
   for (const line of readFileSync(join(STATE_DIR, '.env'), 'utf8').split('\n')) {
