@@ -1205,9 +1205,8 @@ function isActiveModel(alias: string, current: string | undefined): boolean {
 // Combined /model picker: model rows on top, effort rows below. Both knobs
 // configure the same "next turn runs as" question so we render them on one
 // keyboard — fewer slash commands to remember, one tap still acts. Models
-// split 2 per row (base + [1m] variant side by side) and effort levels split
-// 3 + 2 across two rows so labels stay legible on mobile — 5 buttons in one
-// row got squeezed unreadable.
+// split 2 per row and effort levels split 3 + 2 across two rows so labels
+// stay legible on mobile — 5 buttons in one row got squeezed unreadable.
 function modelAndEffortKeyboard(
   curModel?: string,
   curEffort?: string,
@@ -1217,9 +1216,9 @@ function modelAndEffortKeyboard(
   aliases.forEach((alias, i) => {
     if (isActiveModel(alias, curModel)) kb.text(`✓ ${alias}`, 'model:noop')
     else kb.text(alias, `model:${alias}`)
-    // Break after every 2nd button so base + [1m] sit on one row, then
-    // wrap. Skip the trailing row() for the final button (kb.row() below
-    // unconditionally separates the effort section).
+    // Break after every 2nd button so models sit 2 per row, then wrap. Skip
+    // the trailing row() for the final button (kb.row() below unconditionally
+    // separates the effort section).
     if (i % 2 === 1 && i < aliases.length - 1) kb.row()
   })
   kb.row()
@@ -2099,10 +2098,10 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Already active.' }).catch(() => {})
     return
   }
-  // Allow [ and ] so the [1m] long-context variants (opus[1m], sonnet[1m])
-  // match. applyModel rejects anything not in MODEL_ALIASES, so the looser
-  // character class doesn't widen what actually executes.
-  const modelM = /^model:([a-z0-9\-[\]]+)$/.exec(data)
+  // Model alias from a picker button tap. applyModel additionally rejects
+  // anything not in MODEL_ALIASES, so a stale callback from an older message
+  // can't switch to a since-removed alias.
+  const modelM = /^model:([a-z0-9-]+)$/.exec(data)
   if (modelM) {
     const chatId = ctx.chat?.id ?? Number(ctx.callbackQuery.from.id)
     const r = applyModel(modelM[1]!, chatId)

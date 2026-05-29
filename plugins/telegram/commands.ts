@@ -131,18 +131,10 @@ export const COMMAND_REGISTRY: CommandDef[] = [
 ]
 
 /** Short model alias → full Claude Code model ID. Add new tiers here.
- *  The `[1m]` variants enable Claude Code's 1M-token context window — auto-on
- *  for Max/Team/Enterprise plans, rejected by the API on tiers without
- *  long-context entitlement (claude shows "Extra usage is required" in that
- *  case and the user can pick the 200k variant from the same picker). Keys
- *  here are also the picker button labels, so order matters: pair each base
- *  alias with its [1m] variant so they sit next to each other in the row. */
+ *  Keys here are also the picker button labels, so order is the display order. */
 export const MODEL_ALIASES: Record<string, string> = {
   opus: 'claude-opus-4-7',
-  'opus[1m]': 'claude-opus-4-7[1m]',
   sonnet: 'claude-sonnet-4-6',
-  'sonnet[1m]': 'claude-sonnet-4-6[1m]',
-  haiku: 'claude-haiku-4-5-20251001',
 }
 
 /** Effort levels accepted by Claude Code's settings.json. */
