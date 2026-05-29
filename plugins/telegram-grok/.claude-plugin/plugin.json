@@ -1,7 +1,7 @@
 {
   "name": "telegram-grok",
   "description": "Telegram channel for xAI's Grok CLI — stdio MCP bridge with access control, poll-based inbound (wait_for_message), and bundled lifecycle hooks (turn-complete ping, silence watchdog, error relay). Sibling to the telegram (Claude Code) and telegram-codex plugins, maintained by 5dive.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "5dive",
     "email": "support@5dive.com"

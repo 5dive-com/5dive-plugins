@@ -226,6 +226,7 @@ type AttachmentMeta = {
 type InboundMsg = {
   chat_id: string
   message_id: string
+  message_thread_id?: string
   user: string
   user_id: string
   text: string
@@ -265,6 +266,7 @@ function formatInbound(msg: InboundMsg): string {
   const meta = [
     `chat_id=${msg.chat_id}`,
     `message_id=${msg.message_id}`,
+    msg.message_thread_id ? `message_thread_id=${msg.message_thread_id}` : null,
     `user=${msg.user}`,
     `user_id=${msg.user_id}`,
     `ts=${msg.ts}`,
@@ -567,6 +569,11 @@ async function ingest(
   const from = ctx.from!
   const chat = ctx.chat!
   const msgId = ctx.message?.message_id
+  // Forum-supergroup topic. Telegram sets message_thread_id on every message
+  // posted inside a non-General topic; absent for DMs, regular groups, and
+  // posts in a supergroup's General channel. Surfaced in inbound meta so the
+  // model can thread its reply back into the same topic.
+  const threadId = ctx.message?.message_thread_id
 
   // Optional ack reaction (off by default). Fire-and-forget.
   const ack = verdict.access.ackReaction
@@ -581,6 +588,7 @@ async function ingest(
   enqueueInbound({
     chat_id: String(chat.id),
     message_id: msgId != null ? String(msgId) : '0',
+    ...(threadId != null ? { message_thread_id: String(threadId) } : {}),
     user: from.username ?? String(from.id),
     user_id: String(from.id),
     text,
@@ -826,7 +834,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'reply',
       description:
         'Reply on Telegram. Pass chat_id from a prior wait_for_message result. '
-        + 'Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach.',
+        + 'Optionally pass reply_to (message_id) for threading under a specific message, '
+        + 'message_thread_id for posting into a forum topic, and files (absolute paths) to attach.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -835,6 +844,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           reply_to: {
             type: 'string',
             description: 'Message ID to thread under. Use message_id from an inbound message.',
+          },
+          message_thread_id: {
+            type: 'string',
+            description: "Forum topic id. Pass through verbatim from an inbound message's message_thread_id when present, so the reply lands in the same topic instead of the supergroup's General channel. Omit if the inbound had none.",
           },
           files: {
             type: 'array',
@@ -917,6 +930,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const chat_id = String(args.chat_id)
         const text = String(args.text)
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
+        // Forum-topic routing — see the reply tool description. Omitted →
+        // reply goes to General (or the only thread, in a plain group / DM).
+        const message_thread_id = args.message_thread_id != null ? Number(args.message_thread_id) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const format = (args.format as string | undefined) ?? 'text'
         const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
@@ -940,6 +956,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             // would all quote the same inbound, which is noisy.
             const sent = await bot.api.sendMessage(chat_id, chunks[i]!, {
               ...(i === 0 && reply_to != null ? { reply_parameters: { message_id: reply_to } } : {}),
+              ...(message_thread_id != null ? { message_thread_id } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
             })
             sentIds.push(sent.message_id)
@@ -952,7 +969,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         for (const f of files) {
           const ext = extname(f).toLowerCase()
           const input = new InputFile(f)
-          const opts = reply_to != null ? { reply_parameters: { message_id: reply_to } } : undefined
+          const opts = {
+            ...(reply_to != null ? { reply_parameters: { message_id: reply_to } } : {}),
+            ...(message_thread_id != null ? { message_thread_id } : {}),
+          }
           const out = PHOTO_EXTS.has(ext)
             ? await bot.api.sendPhoto(chat_id, input, opts)
             : await bot.api.sendDocument(chat_id, input, opts)
