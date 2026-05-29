@@ -891,6 +891,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
+  markActivity()
   try {
     switch (req.params.name) {
       case 'wait_for_message': {
@@ -1010,6 +1011,73 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 })
 
 // ============================================================================
+// Listen-loop self-heal
+//
+// codex/grok have no push channel: the agent only receives Telegram messages
+// while parked in a wait_for_message call, which it re-enters after each reply
+// (see AGENTS.md "Loop"). A rough restart — e.g. the nightly host-updates cron
+// leaving systemd timeout-kills + leftover processes — can boot the agent to an
+// idle prompt OUTSIDE that loop. The server keeps draining getUpdates but the
+// model never sees the message, so the bot looks dead. We watch for that and
+// re-kick the loop via the same tmux send-keys path /stop already uses.
+//
+// Knobs: TELEGRAM_REARM_DISABLED=1 turns it off; TELEGRAM_REARM_IDLE_MS sets the
+// idle threshold (default 45000 — deliberately > the 30s ack contract so a
+// healthy mid-task agent, which touches the server at least that often, never
+// trips it).
+// ============================================================================
+const REARM_DISABLED = process.env.TELEGRAM_REARM_DISABLED === '1'
+const REARM_IDLE_MS = Math.max(20_000, Math.min(600_000,
+  Number(process.env.TELEGRAM_REARM_IDLE_MS ?? 45_000)))
+const REARM_CHECK_MS = 15_000
+const REARM_KICK_TEXT =
+  'Resume your Telegram listen loop: call wait_for_message now and keep looping '
+  + '(on each message reply, then call wait_for_message again; on timeout call it '
+  + 'again immediately). This is an automated re-arm — do not send a Telegram reply about it.'
+
+// Bumped on every MCP tool call. A working agent (not parked in wait_for_message)
+// still acks/edits within ~30s, so recent activity means "busy, leave alone";
+// prolonged silence with no parked waiter means "fell out of the loop".
+let lastServerActivity = Date.now()
+let rearmKicks = 0
+function markActivity(): void { lastServerActivity = Date.now() }
+
+function kickListenLoop(): void {
+  const name = agentName()
+  if (name === 'unknown') return
+  const cp = require('child_process')
+  // Type the prompt as a literal line, then submit. Two send-keys calls because
+  // codex's TUI occasionally drops an Enter folded into the same call.
+  cp.execFile('tmux', ['send-keys', '-t', `agent-${name}`, '-l', REARM_KICK_TEXT],
+    { timeout: 5_000 }, (err: any) => {
+      if (err) { process.stderr.write(`telegram-codex: rearm send-keys failed: ${err.message}\n`); return }
+      setTimeout(() => {
+        cp.execFile('tmux', ['send-keys', '-t', `agent-${name}`, 'Enter'], { timeout: 5_000 }, () => {})
+      }, 400)
+    })
+}
+
+function startRearmWatchdog(): void {
+  if (REARM_DISABLED) return
+  if (agentName() === 'unknown') return
+  const timer = setInterval(() => {
+    // Parked in wait_for_message → loop is armed and healthy.
+    if (waiters.length > 0) { rearmKicks = 0; return }
+    const idle = Date.now() - lastServerActivity
+    if (idle < REARM_IDLE_MS) return
+    // Stalled out of the loop. Back off on repeated kicks (1×,2×,4×…cap 8×) so a
+    // genuinely wedged session isn't spammed; a successful re-arm resets the count.
+    const backoff = Math.min(8, 2 ** rearmKicks)
+    if (idle < REARM_IDLE_MS * backoff) return
+    process.stderr.write(`telegram-codex: listen loop idle ${Math.round(idle / 1000)}s, re-arming (kick #${rearmKicks + 1})\n`)
+    kickListenLoop()
+    rearmKicks += 1
+    lastServerActivity = Date.now()  // reset clock; wait before the next kick
+  }, REARM_CHECK_MS)
+  timer.unref?.()
+}
+
+// ============================================================================
 // Boot
 // ============================================================================
 
@@ -1019,6 +1087,7 @@ process.on('SIGINT',  () => { shuttingDown = true; bot.stop().catch(() => {}) })
 await mcp.connect(new StdioServerTransport())
 
 startPermissionBridge()
+startRearmWatchdog()
 
 void (async () => {
   for (let attempt = 1; ; attempt++) {
