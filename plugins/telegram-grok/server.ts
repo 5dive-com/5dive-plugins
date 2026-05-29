@@ -28,6 +28,7 @@ import {
   readFileSync, writeFileSync, mkdirSync, chmodSync, statSync,
   realpathSync, renameSync,
 } from 'fs'
+import { randomBytes } from 'crypto'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 
@@ -105,6 +106,18 @@ type GroupPolicy = {
   allowFrom: string[]
 }
 
+// A stranger's in-flight pairing attempt. Keyed by a short code in
+// access.json's `pending` map. The 5dive CLI's `pair --code <code>` reads
+// senderId + chatId from here to promote the sender into allowFrom; the
+// rest is for the plugin's own expiry + reply-throttle bookkeeping.
+type PendingEntry = {
+  senderId: string
+  chatId: string
+  createdAt: number
+  expiresAt: number
+  replies: number
+}
+
 type AccessJson = {
   allowFrom: string[]
   groups: Record<string, GroupPolicy>
@@ -119,10 +132,14 @@ type AccessJson = {
   //                        get through; everyone else is silently dropped.
   // "static" — synonym of allowlist for now; reserved for parity with the
   //            Claude build's static-mode semantics.
-  dmPolicy?: 'allowlist' | 'static'
+  // "pairing" — a stranger DM gets a short code written to `pending` and is
+  //            told to relay it; the 5dive CLI's `pair --code` consumes it.
+  dmPolicy?: 'allowlist' | 'static' | 'pairing'
+  // In-flight pairing attempts, keyed by code. Honored only in "pairing" mode.
+  pending?: Record<string, PendingEntry>
 }
 
-const DEFAULT_ACCESS: AccessJson = { allowFrom: [], groups: {} }
+const DEFAULT_ACCESS: AccessJson = { allowFrom: [], groups: {}, pending: {} }
 
 function loadAccess(): AccessJson {
   try {
@@ -135,11 +152,41 @@ function loadAccess(): AccessJson {
       textChunkLimit: typeof parsed.textChunkLimit === 'number'
         ? Math.max(500, Math.min(4096, parsed.textChunkLimit))
         : undefined,
-      dmPolicy: parsed.dmPolicy === 'static' ? 'static' : 'allowlist',
+      dmPolicy: parsed.dmPolicy === 'static' ? 'static'
+        : parsed.dmPolicy === 'pairing' ? 'pairing'
+        : 'allowlist',
+      pending: parsed.pending ?? {},
     }
   } catch {
-    return { ...DEFAULT_ACCESS }
+    return { ...DEFAULT_ACCESS, pending: {} }
   }
+}
+
+// Persist access.json atomically. Used by the pairing flow to record/clear
+// `pending` codes. Unknown top-level keys the CLI/dashboard may add are
+// preserved because we round-trip the full loaded object.
+function saveAccess(a: AccessJson): void {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+    const tmp = ACCESS_FILE + '.tmp'
+    writeFileSync(tmp, JSON.stringify(a, null, 2) + '\n', { mode: 0o600 })
+    renameSync(tmp, ACCESS_FILE)
+  } catch (err) {
+    process.stderr.write(`telegram-grok: saveAccess failed: ${err}\n`)
+  }
+}
+
+// Drop expired pending codes. Returns true if anything changed.
+function pruneExpired(a: AccessJson): boolean {
+  const now = Date.now()
+  let changed = false
+  for (const [code, p] of Object.entries(a.pending ?? {})) {
+    if (p.expiresAt < now) {
+      delete a.pending![code]
+      changed = true
+    }
+  }
+  return changed
 }
 
 // Refuse to refer to anything outside STATE_DIR — defense in depth, the
@@ -159,7 +206,12 @@ function assertInStateDir(path: string) {
 // chat_id may be a DM (== from.id) or a group/channel id (negative). We
 // allow DMs if from.id ∈ allowFrom, and groups if the group id is keyed
 // in `groups` and the per-group policy admits the sender + mention rule.
-function gate(ctx: Context): { allowed: true; access: AccessJson } | { allowed: false } {
+type GateResult =
+  | { allowed: true; access: AccessJson }
+  | { allowed: false }
+  | { allowed: false; pair: { code: string; chatId: string; isResend: boolean } }
+
+function gate(ctx: Context): GateResult {
   const access = loadAccess()
   const chat = ctx.chat
   const from = ctx.from
@@ -170,6 +222,37 @@ function gate(ctx: Context): { allowed: true; access: AccessJson } | { allowed: 
 
   if (chat.type === 'private') {
     if (access.allowFrom.includes(senderId)) return { allowed: true, access }
+
+    // Pairing mode: mint/replay a code so the 5dive CLI's `pair --code` can
+    // promote this sender. Any other dmPolicy silently drops strangers.
+    if (access.dmPolicy === 'pairing') {
+      if (pruneExpired(access)) saveAccess(access)
+
+      // Existing non-expired code for this sender → remind once, then go quiet.
+      for (const [code, p] of Object.entries(access.pending ?? {})) {
+        if (p.senderId === senderId) {
+          if ((p.replies ?? 1) >= 2) return { allowed: false }
+          p.replies = (p.replies ?? 1) + 1
+          saveAccess(access)
+          return { allowed: false, pair: { code, chatId, isResend: true } }
+        }
+      }
+      // Cap concurrent pending attempts to bound abuse.
+      if (Object.keys(access.pending ?? {}).length >= 3) return { allowed: false }
+
+      const code = randomBytes(3).toString('hex') // 6 hex chars
+      const now = Date.now()
+      access.pending = access.pending ?? {}
+      access.pending[code] = {
+        senderId,
+        chatId,
+        createdAt: now,
+        expiresAt: now + 60 * 60 * 1000, // 1h
+        replies: 1,
+      }
+      saveAccess(access)
+      return { allowed: false, pair: { code, chatId, isResend: false } }
+    }
     return { allowed: false }
   }
 
@@ -652,7 +735,22 @@ async function ingest(
   attachment?: AttachmentMeta,
 ): Promise<void> {
   const verdict = gate(ctx)
-  if (!verdict.allowed) return
+  if (!verdict.allowed) {
+    // Pairing mode: tell the stranger their code so they can relay it to the
+    // operator. Sent directly (not via the allowlist-gated reply tool) since
+    // the sender isn't allowed yet. The code is already persisted in pending.
+    if ('pair' in verdict && verdict.pair) {
+      const { code, chatId, isResend } = verdict.pair
+      const lead = isResend ? 'Still pending' : 'Pairing required'
+      await bot.api.sendMessage(chatId,
+        `${lead} — give this code to the 5dive operator to approve you:\n\n` +
+        `\`${code}\`\n\n` +
+        `They run: 5dive agent pair <agent> --code=${code}`,
+        { parse_mode: 'Markdown' },
+      ).catch(() => {})
+    }
+    return
+  }
 
   if (await handleSlashCommand(ctx, text)) return
 
