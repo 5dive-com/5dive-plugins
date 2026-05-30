@@ -1379,9 +1379,15 @@ void (async () => {
           process.stderr.write(`telegram-codex: polling as @${info.username}\n`)
           // Register the bot command menu so the TG app surfaces /<cmd>
           // suggestions. Failures are non-fatal — polling continues.
-          void bot.api.setMyCommands(BOT_COMMANDS).catch(err => {
-            process.stderr.write(`telegram-codex: setMyCommands failed: ${err}\n`)
-          })
+          // Write the menu to BOTH the default scope (groups + fallback) and
+          // all_private_chats (DMs). A recycled bot token can carry a stale
+          // all_private_chats menu that would otherwise shadow the default one
+          // in DMs (Telegram resolves the most specific scope per chat).
+          for (const scope of [undefined, { type: 'all_private_chats' as const }]) {
+            void bot.api.setMyCommands(BOT_COMMANDS, scope ? { scope } : undefined).catch(err => {
+              process.stderr.write(`telegram-codex: setMyCommands(${scope?.type ?? 'default'}) failed: ${err}\n`)
+            })
+          }
         },
       })
       return
