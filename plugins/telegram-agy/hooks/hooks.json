@@ -1,0 +1,38 @@
+{
+  "description": "5dive telegram-agy lifecycle hooks — silence watchdog (PreToolUse) pings when Antigravity works quietly too long, turn-complete ping (Stop), and error/crash relay (Notification) to Telegram.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/silence-watchdog.ts",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/notify-stop.ts",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/notification-relay.ts",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

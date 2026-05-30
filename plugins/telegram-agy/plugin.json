@@ -1,0 +1,18 @@
+{
+  "name": "telegram-agy",
+  "description": "Telegram channel for Google's Antigravity CLI — stdio MCP bridge with access control, poll-based inbound (wait_for_message), and bundled lifecycle hooks (turn-complete ping, silence watchdog, error relay). Sibling to the telegram (Claude Code) and telegram-codex plugins, maintained by 5dive.",
+  "version": "0.1.0",
+  "author": {
+    "name": "5dive",
+    "email": "support@5dive.com"
+  },
+  "homepage": "https://github.com/5dive-com/5dive-plugins/tree/main/plugins/telegram-agy",
+  "keywords": [
+    "telegram",
+    "messaging",
+    "channel",
+    "mcp",
+    "agy",
+    "gemini"
+  ]
+}
