@@ -472,22 +472,58 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch { return false }
 }
 
-function statusText(): string {
-  const access = loadAccess()
-  let mcpPid = 0
-  try { mcpPid = parseInt(readFileSync(PID_FILE, 'utf8'), 10) } catch {}
-  const mcpAlive = pidAlive(mcpPid) && mcpPid === process.pid
+const SERVER_STARTED_AT = Date.now()
+const CLI_BIN = 'codex'
 
-  const lines = [
-    `*telegram-codex* v${PLUGIN_VERSION}`,
-    ``,
-    `bot:        @${botUsername || '?'}`,
-    `MCP poller: ${mcpAlive ? `✅ alive (pid ${process.pid})` : '⚠️  pid mismatch / stale'}`,
-    `allowlist:  ${access.allowFrom.length} user(s), ${Object.keys(access.groups).length} group(s)`,
-    `last inbound: ${lastInboundTs ?? '(none this session)'}`,
-    ``,
-    `state dir:  \`${STATE_DIR}\``,
-  ]
+function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60), sec = s % 60
+  if (d) return `${d}d ${h}h`
+  if (h) return `${h}h ${m}m`
+  if (m) return `${m}m ${sec}s`
+  return `${sec}s`
+}
+
+// Best-effort plain-text exec for `<cli> --version` / `5dive --version`.
+function execText(cmd: string, args: string[]): Promise<string | null> {
+  return new Promise(resolve => {
+    require('child_process').execFile(cmd, args, { timeout: 4000 }, (err: any, out: string) => {
+      resolve(err ? null : (String(out || '').split('\n')[0].trim() || null))
+    })
+  })
+}
+
+// This agent's 5dive registry entry (auth profile + workdir) for the status footer.
+async function read5diveSelf(): Promise<{ authProfile?: string; workdir?: string } | null> {
+  try {
+    const j = await run5dive(['agent', 'list'])
+    if (!j.ok || !Array.isArray(j.data)) return null
+    const e = j.data.find((a: any) => a.name === agentName())
+    return e ? { authProfile: e.authProfile ?? undefined, workdir: e.workdir ?? undefined } : null
+  } catch { return null }
+}
+
+// /status — mirrors the Claude telegram plugin's layout as closely as the
+// CLI runtime allows. Codex has no session-status / usage cache like claude's,
+// so `status` is derived from the bridge (listening vs working) and usage is
+// omitted rather than faked.
+async function statusText(senderName: string): Promise<string> {
+  const now = Date.now()
+  const lines = [`Paired as ${senderName}.`, '']
+  lines.push(`status: ${waiters.length > 0 ? '🟢 listening' : '🟡 working'}`)
+  const model = readConfigModel()
+  if (model) lines.push(`model: ${model}`)
+  lines.push(`uptime: ${formatDuration(now - SERVER_STARTED_AT)}`)
+  lines.push(`last activity: ${lastInboundTs ? `${formatDuration(now - Date.parse(lastInboundTs))} ago` : '(none this session)'}`)
+  const cliVer = await execText(CLI_BIN, ['--version'])
+  if (cliVer) lines.push(`${CLI_LABEL.toLowerCase()}: ${cliVer}`)
+  lines.push(`plugin: v${PLUGIN_VERSION}`)
+  const fiveVer = await execText('sudo', ['-n', '5dive', '--version'])
+  if (fiveVer) lines.push(`5dive: ${fiveVer}`)
+  const self = await read5diveSelf()
+  if (self?.authProfile) lines.push(`account: ${self.authProfile}`)
+  if (self?.workdir) lines.push(`workdir: ${self.workdir}`)
   return lines.join('\n')
 }
 
@@ -715,12 +751,13 @@ async function handleSlashCommand(ctx: Context, text: string): Promise<boolean> 
           ...(reply_to ? { reply_parameters: { message_id: reply_to } } : {}),
         })
         return true
-      case 'status':
-        await bot.api.sendMessage(chat_id, statusText(), {
-          parse_mode: 'Markdown',
+      case 'status': {
+        const sender = ctx.from?.username ? `@${ctx.from.username}` : String(ctx.from?.id ?? 'you')
+        await bot.api.sendMessage(chat_id, await statusText(sender), {
           ...(reply_to ? { reply_parameters: { message_id: reply_to } } : {}),
         })
         return true
+      }
       case 'ping':
         await bot.api.sendMessage(chat_id, `pong — telegram-codex v${PLUGIN_VERSION}`, {
           ...(reply_to ? { reply_parameters: { message_id: reply_to } } : {}),
