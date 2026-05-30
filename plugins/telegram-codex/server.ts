@@ -494,13 +494,15 @@ function execText(cmd: string, args: string[]): Promise<string | null> {
   })
 }
 
-// This agent's 5dive registry entry (auth profile + workdir) for the status footer.
-async function read5diveSelf(): Promise<{ authProfile?: string; workdir?: string } | null> {
+// This agent's `5dive agent info` (cliVersion + authProfile), v0.1.25+. The CLI
+// resolves cliVersion by probing the agent's actual TYPE_BIN — more accurate
+// than a PATH lookup (agy's binary isn't on the agent PATH; codex runs 0.134
+// via TYPE_BIN even when a newer one sits on the login PATH).
+async function read5diveInfo(): Promise<{ cliVersion?: string; authProfile?: string } | null> {
   try {
-    const j = await run5dive(['agent', 'list'])
-    if (!j.ok || !Array.isArray(j.data)) return null
-    const e = j.data.find((a: any) => a.name === agentName())
-    return e ? { authProfile: e.authProfile ?? undefined, workdir: e.workdir ?? undefined } : null
+    const j = await run5dive(['agent', 'info', agentName()])
+    if (!j.ok || !j.data) return null
+    return { cliVersion: j.data.cliVersion ?? undefined, authProfile: j.data.authProfile ?? undefined }
   } catch { return null }
 }
 
@@ -584,14 +586,16 @@ async function statusText(senderName: string): Promise<string> {
   lines.push(`uptime: ${formatDuration(agentUptimeMs())}`)
   const lastAct = lastActivityMs()
   lines.push(`last activity: ${lastAct ? `${formatDuration(now - lastAct)} ago` : '(none this session)'}`)
-  const cliVer = await execText('bash', ['-lc', `${CLI_BIN} --version`])
-  if (cliVer) lines.push(`${CLI_LABEL.toLowerCase()}: ${fmtVer(cliVer)}`)
+  const info = await read5diveInfo()
+  if (info?.cliVersion) {
+    const v0 = info.cliVersion.replace(/^[A-Za-z][A-Za-z0-9-]*\s+/, '').trim() || info.cliVersion
+    lines.push(`${CLI_LABEL.toLowerCase()}: ${/^\d/.test(v0) ? 'v' + v0 : v0}`)
+  }
   lines.push(`plugin: v${PLUGIN_VERSION}`)
   const fiveVer = await execText('sudo', ['-n', '5dive', '--version'])
   if (fiveVer) lines.push(`5dive: ${fmtVer(fiveVer)}`)
-  const self = await read5diveSelf()
-  if (self) lines.push(`account: ${self.authProfile || 'default'}`)
-  const wd = self?.workdir || agentWorkdir()
+  lines.push(`account: ${info?.authProfile || 'default'}`)
+  const wd = agentWorkdir()
   if (wd) lines.push(`workdir: ${wd}`)
   return lines.join('\n')
 }
