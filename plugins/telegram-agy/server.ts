@@ -439,17 +439,17 @@ let lastInboundTs: string | null = null
 // switching, stop, restart, checkpoint). Those would require IPC into the
 // running session and are out of scope here.
 const BOT_COMMANDS: Array<{ command: string; description: string }> = [
-  { command: 'help',    description: 'list bot commands and version' },
-  { command: 'status',  description: 'show bridge health: token, allowlist, MCP server, last inbound' },
-  { command: 'ping',    description: 'liveness check — replies with bot + plugin version' },
-  { command: 'stop',    description: 'interrupt the current Antigravity turn (sends Ctrl-C to the pane)' },
-  { command: 'restart', description: 'restart the Antigravity agent (systemd respawn brings it back in ~2s)' },
-  { command: 'model',   description: 'show available models (switching via agy TUI for now)' },
-  { command: 'agents',  description: 'list sibling 5dive agents on this host' },
-  { command: 'tasks',   description: 'list open tasks from the shared 5dive queue' },
-  { command: 'task',    description: 'create a task: /task add <title>' },
-  { command: 'org',     description: 'show the 5dive agent org chart' },
-  { command: 'start',   description: 'how to pair this bot to a Antigravity session' },
+  { command: 'help',    description: 'Show commands' },
+  { command: 'status',  description: 'Pairing, usage, model' },
+  { command: 'ping',    description: 'Liveness check' },
+  { command: 'stop',    description: 'Interrupt task' },
+  { command: 'restart', description: 'Respawn agy' },
+  { command: 'model',   description: 'Show models' },
+  { command: 'agents',  description: 'Team' },
+  { command: 'tasks',   description: 'List open tasks' },
+  { command: 'task',    description: 'Add a task — /task add <title>' },
+  { command: 'org',     description: 'Show the agent org chart' },
+  { command: 'start',   description: 'Pair this chat' },
 ]
 
 function helpText(): string {
