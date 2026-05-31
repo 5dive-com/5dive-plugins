@@ -29,7 +29,16 @@ const msg = [payload.message, payload.reason, typeof payload.error === 'string' 
   .join(' | ') || 'no details'
 
 const raw = JSON.stringify(payload)
-const isRateLimit = /rate_limit|usage.limit/i.test(raw)
+
+// A transient server-side 429 ("Server is temporarily limiting requests · Rate
+// limited") is explicitly NOT a usage limit — but its text literally contains
+// the substring "usage limit" (in the phrase "not your usage limit"), so the
+// naive usage-limit regex below matches it and we'd report a bogus "usage limit
+// hit — couldn't read the reset time" (there's no reset epoch on a transient
+// throttle). Detect the transient phrasing first and exclude it from the
+// usage-limit branch; it's routed to the transient-API-error recovery instead.
+const isTransientRateLimit = /not your usage limit|temporarily limiting requests/i.test(raw)
+const isRateLimit = !isTransientRateLimit && /rate_limit|usage.limit/i.test(raw)
 
 const transcriptPath = payload.transcript_path
 let entries = transcriptPath ? readEntries(transcriptPath) : []
@@ -58,7 +67,8 @@ const pane = capturePane()
 const transientHaystack = `${raw}\n${pane}`
 const isTransientApiError =
   !isRateLimit &&
-  /overloaded|API Error:\s*(?:5(?:0[234]|29))\b|"type":\s*"(?:overloaded|api)_error"/i.test(transientHaystack)
+  (isTransientRateLimit ||
+    /overloaded|API Error:\s*(?:5(?:0[234]|29))\b|"type":\s*"(?:overloaded|api)_error"/i.test(transientHaystack))
 
 // Resolve an unlock/reset epoch. Order: payload → transcript → message text → pane.
 let resetEpoch: number | null = null
@@ -139,14 +149,21 @@ if (isRateLimit) {
   } else {
     text = 'Usage limit hit — waiting for reset.'
   }
+} else if (isTransientApiError) {
+  // Transient server-side blip — an Overloaded/5xx, or a 429 "temporarily
+  // limiting requests" that's explicitly NOT a usage limit. It self-clears on
+  // retry, so lead with the reassuring framing (not "stopped with an error")
+  // and surface the underlying API line. The resume-after-error helper drives
+  // 'continue' with backoff when we have a pane to type into.
+  const apiLine = pane?.split('\n').map(l => l.trim()).find(l => /^API Error:/i.test(l))
+  const detail = apiLine ?? msg
+  const recovery = tmuxCtx ? "Auto-retrying 'continue' with backoff." : 'Will resume on the next turn.'
+  text = `Transient API throttle/overload — NOT a usage limit. ${recovery}\n${detail}`
 } else {
   text = `The agent stopped with an error: ${msg}`
   if (pane) {
     const apiErr = pane.match(/API Error:\s+(?:\d+|Overloaded)[^.-]*/gi)?.pop()
     if (apiErr) text += `\n${apiErr}`
-  }
-  if (isTransientApiError && tmuxCtx) {
-    text += `\nTransient API error — auto-retrying 'continue' with backoff.`
   }
 }
 
