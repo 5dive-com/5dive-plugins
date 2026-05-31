@@ -205,12 +205,10 @@ describe.each(FORKS)('%s: /restart acks before respawn (DIVE-13)', plugin => {
 // ---- turn-based liveness (DIVE-15 / DIVE-14) ----
 
 describe('turn-based re-arm liveness', () => {
-  test('codex + grok base idle on real turn mtime (newestTurnMtimeMs)', () => {
-    expect(has(read('telegram-codex'), TURN_LIVENESS)).toBe(true)
-    expect(has(read('telegram-grok'), TURN_LIVENESS)).toBe(true)
+  // All three forks must base idle on the most recent real agent turn, not just the
+  // last Telegram-MCP call, or a heads-down agent gets false-kicked out of its task
+  // (the 5dive-exact-swallow bug). agy got this in DIVE-14 (reads ~/.gemini conversations).
+  test.each(FORKS)('%s bases idle on real turn mtime (newestTurnMtimeMs)', plugin => {
+    expect(has(read(plugin), TURN_LIVENESS)).toBe(true)
   })
-
-  // DIVE-14: port newestTurnMtimeMs to agy (reads ~/.gemini transcripts). Until then agy
-  // uses the fixed idle threshold only. Flip this to a real assertion when DIVE-14 lands.
-  test.todo('agy bases idle on real turn mtime (newestTurnMtimeMs) — pending DIVE-14')
 })

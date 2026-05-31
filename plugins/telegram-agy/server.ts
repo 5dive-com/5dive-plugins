@@ -1288,13 +1288,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 // re-kick the loop via the same tmux send-keys path /stop already uses.
 //
 // Knobs: TELEGRAM_REARM_DISABLED=1 turns it off; TELEGRAM_REARM_IDLE_MS sets the
-// idle threshold (default 45000 — deliberately > the 30s ack contract so a
-// healthy mid-task agent, which touches the server at least that often, never
-// trips it).
+// idle threshold (default 180000 — raised from 45s to match codex/grok: Antigravity
+// is a reasoning model that can think for a single long span which writes nothing,
+// so a shorter threshold false-kicks a busy agent. Liveness also consults the real
+// agent-turn mtime below, so this threshold only governs the genuinely-idle case).
 // ============================================================================
 const REARM_DISABLED = process.env.TELEGRAM_REARM_DISABLED === '1'
 const REARM_IDLE_MS = Math.max(20_000, Math.min(600_000,
-  Number(process.env.TELEGRAM_REARM_IDLE_MS ?? 45_000)))
+  Number(process.env.TELEGRAM_REARM_IDLE_MS ?? 180_000)))
 const REARM_CHECK_MS = 15_000
 const REARM_KICK_TEXT =
   'Resume your Telegram listen loop: call wait_for_message now and keep looping '
@@ -1414,13 +1415,46 @@ function kickListenLoop(): void {
     })
 }
 
+// Newest agent-turn mtime (ms) — the "still doing real work" signal used by the
+// watchdog below. Antigravity writes a per-conversation protobuf to
+// ~/.gemini/antigravity-cli/conversations/<uuid>.pb on every turn; the re-arm
+// prompt also lands in history.jsonl, so the conversation files are the clean
+// PRIMARY and history.jsonl the fallback (covers the first turn before any
+// conversation file exists). Returns 0 if none. Mirrors codex/grok (DIVE-14).
+const AGY_CLI_DIR = join(
+  process.env.ANTIGRAVITY_HOME ?? process.env.GEMINI_HOME ?? join(homedir(), '.gemini'),
+  'antigravity-cli')
+const AGY_CONVERSATIONS_DIR = join(AGY_CLI_DIR, 'conversations')
+const AGY_HISTORY_FILE = join(AGY_CLI_DIR, 'history.jsonl')
+function newestTurnMtimeMs(): number {
+  try {
+    const cp = require('child_process')
+    const out: string = cp.execFileSync('find',
+      [AGY_CONVERSATIONS_DIR, '-name', '*.pb', '-printf', '%T@\\n'],
+      { timeout: 4_000, encoding: 'utf8' })
+    const secs = out.split('\n').reduce((m: number, l: string) => Math.max(m, Number(l) || 0), 0)
+    if (secs > 0) return Math.round(secs * 1000)
+  } catch { /* fall through to history.jsonl */ }
+  try { return statSync(AGY_HISTORY_FILE).mtimeMs } catch { return 0 }
+}
+
 function startRearmWatchdog(): void {
   if (REARM_DISABLED) return
   if (agentName() === 'unknown') return
   const timer = setInterval(() => {
     // Parked in wait_for_message → loop is armed and healthy.
     if (waiters.length > 0) { rearmKicks = 0; clearStallAlert(); return }
-    const idle = Date.now() - lastServerActivity
+    const now = Date.now()
+    // Liveness = the most recent of a Telegram-MCP call OR a real agent turn.
+    // markActivity() only fires on Telegram tool calls, so an agent heads-down on
+    // a task leaves lastServerActivity stale and would be wrongly kicked back into
+    // wait_for_message, abandoning the task (the codex/grok 5dive-exact-swallow
+    // bug). Only pay for the turn-mtime stat once the cheap signal already looks stale.
+    let idle = now - lastServerActivity
+    if (idle >= REARM_IDLE_MS) {
+      const lastTurn = newestTurnMtimeMs()
+      if (lastTurn > 0) idle = Math.min(idle, now - lastTurn)
+    }
     if (idle < REARM_IDLE_MS) return
     // Stalled out of the loop. Back off on repeated kicks (1×,2×,4×…cap 8×) so a
     // genuinely wedged session isn't spammed; a successful re-arm resets the count.
