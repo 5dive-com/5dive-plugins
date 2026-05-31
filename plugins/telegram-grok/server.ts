@@ -1424,13 +1424,44 @@ function kickListenLoop(): void {
     })
 }
 
+// Newest agent-turn mtime (ms) — the "still doing real work" signal used by the
+// watchdog below. Grok writes per-turn transcript files (events/chat_history/
+// updates .jsonl) under ~/.grok/sessions/<cwd>/<session-id>/. prompt_history.jsonl
+// is deliberately EXCLUDED: the re-arm prompt itself lands there, so it would
+// mask a genuinely-wedged session. Returns 0 if none found.
+const GROK_SESSIONS_DIR = join(STATE_DIR, '..', '..', 'sessions')
+function newestTurnMtimeMs(): number {
+  try {
+    const cp = require('child_process')
+    const out: string = cp.execFileSync('find',
+      [GROK_SESSIONS_DIR, '-type', 'f', '(',
+        '-name', 'events.jsonl', '-o', '-name', 'chat_history.jsonl', '-o', '-name', 'updates.jsonl',
+       ')', '-printf', '%T@\\n'],
+      { timeout: 4_000, encoding: 'utf8' })
+    const secs = out.split('\n').reduce((m: number, l: string) => Math.max(m, Number(l) || 0), 0)
+    if (secs > 0) return Math.round(secs * 1000)
+  } catch { /* fall through */ }
+  return 0
+}
+
 function startRearmWatchdog(): void {
   if (REARM_DISABLED) return
   if (agentName() === 'unknown') return
   const timer = setInterval(() => {
     // Parked in wait_for_message → loop is armed and healthy.
     if (waiters.length > 0) { rearmKicks = 0; clearStallAlert(); return }
-    const idle = Date.now() - lastServerActivity
+    const now = Date.now()
+    // Liveness = the most recent of a Telegram-MCP call OR a real agent turn.
+    // markActivity() only fires on Telegram tool calls, so an agent heads-down
+    // on a task (shell/edits/`5dive task start`) leaves lastServerActivity stale
+    // and would be wrongly kicked back into wait_for_message, abandoning the
+    // task (customer bug 5dive-exact-swallow). Only pay for the turn-activity
+    // stat once the cheap signal already looks stale.
+    let idle = now - lastServerActivity
+    if (idle >= REARM_IDLE_MS) {
+      const lastTurn = newestTurnMtimeMs()
+      if (lastTurn > 0) idle = Math.min(idle, now - lastTurn)
+    }
     if (idle < REARM_IDLE_MS) return
     // Stalled out of the loop. Back off on repeated kicks (1×,2×,4×…cap 8×) so a
     // genuinely wedged session isn't spammed; a successful re-arm resets the count.
@@ -1439,7 +1470,7 @@ function startRearmWatchdog(): void {
     process.stderr.write(`telegram-grok: listen loop idle ${Math.round(idle / 1000)}s, re-arming (kick #${rearmKicks + 1})\n`)
     kickListenLoop()
     rearmKicks += 1
-    lastServerActivity = Date.now()  // reset clock; wait before the next kick
+    lastServerActivity = now  // reset clock; wait before the next kick
     // Repeated kicks aren't reviving the loop → a quota/auth/wedge stall the
     // watchdog can't fix on its own. Tell the owner once (best-effort, deduped).
     if (!STALL_ALERT_DISABLED && rearmKicks >= STALL_ESCALATE_AFTER) sendStallAlert()
