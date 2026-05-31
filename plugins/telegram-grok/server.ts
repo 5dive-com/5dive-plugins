@@ -1299,13 +1299,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 // re-kick the loop via the same tmux send-keys path /stop already uses.
 //
 // Knobs: TELEGRAM_REARM_DISABLED=1 turns it off; TELEGRAM_REARM_IDLE_MS sets the
-// idle threshold (default 45000 — deliberately > the 30s ack contract so a
-// healthy mid-task agent, which touches the server at least that often, never
-// trips it).
+// idle threshold (default 180000). It MUST comfortably exceed the longest single
+// model-inference span: a reasoning model can reason 60–120s+ in ONE span that
+// writes nothing to the session transcript, so newestTurnMtimeMs() goes stale
+// mid-turn and a lower threshold kicks a busy agent off its task (customer bug
+// 5dive-exact-swallow). 180s covers typical reasoning; a genuinely-wedged
+// session is still caught (just slower) and backstopped by sendStallAlert.
+// Tunable up to 600s for agents that reason even longer.
 // ============================================================================
 const REARM_DISABLED = process.env.TELEGRAM_REARM_DISABLED === '1'
 const REARM_IDLE_MS = Math.max(20_000, Math.min(600_000,
-  Number(process.env.TELEGRAM_REARM_IDLE_MS ?? 45_000)))
+  Number(process.env.TELEGRAM_REARM_IDLE_MS ?? 180_000)))
 const REARM_CHECK_MS = 15_000
 const REARM_KICK_TEXT =
   'Resume your Telegram listen loop: call wait_for_message now and keep looping '
