@@ -93,7 +93,7 @@ const GOLDEN_ACCESS_FIELDS = ['allowFrom', 'groups', 'pending', 'dmPolicy']
 // may need a new command or a description sync.
 const GOLDEN_BASELINE_MENU = [
   'help', 'status', 'context', 'stop', 'restart', 'clear', 'checkpoint', 'resume',
-  'agents', 'tasks', 'task', 'org', 'update', 'model', 'account', 'goal',
+  'agents', 'tasks', 'task', 'org', 'update', 'model', 'account', 'usage', 'goal',
 ]
 const WATCHDOG_COMMON = ['startRearmWatchdog', 'REARM_IDLE_MS', 'markActivity', 'lastServerActivity']
 const TURN_LIVENESS = 'newestTurnMtimeMs' // codex+grok; agy pending DIVE-14

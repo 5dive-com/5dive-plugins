@@ -124,6 +124,11 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     scope: 'paired-5dive',
   },
   {
+    name: 'usage',
+    description: '5h/7d limit usage',
+    scope: 'paired-5dive',
+  },
+  {
     name: 'goal',
     description: 'Self-paced goal',
     scope: 'paired',

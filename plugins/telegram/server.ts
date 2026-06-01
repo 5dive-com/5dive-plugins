@@ -1143,6 +1143,45 @@ async function read5diveAccountList(): Promise<FiveDiveAccountEntry[] | null> {
   }
 }
 
+type FiveDiveUsageWindow = { pct: number; resetsAt: number } | null
+type FiveDiveAccountUsage = {
+  name: string
+  usage: {
+    fiveHour: FiveDiveUsageWindow
+    sevenDay: FiveDiveUsageWindow
+    asOf: number
+    source: string
+  } | null
+}
+
+// `5dive account usage --json` — per-account Anthropic 5h/7d limit usage, read
+// from each account's freshest bound-agent statusline cache. Backs the
+// /account button dots and the /usage board. Best-effort: returns null on any
+// failure (e.g. a CLI without the `usage` subcommand yet) so callers degrade
+// to "no usage" rather than erroring.
+async function read5diveAccountUsage(): Promise<FiveDiveAccountUsage[] | null> {
+  try {
+    const { stdout } = await execFileP('sudo', ['-n', '5dive', 'account', 'usage', '--json'], { timeout: 5000 })
+    const j = JSON.parse(stdout)
+    if (j?.ok && Array.isArray(j.data)) return j.data as FiveDiveAccountUsage[]
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Pick the 🟢/🟡/🔴 dot from the WORSE of an account's two windows (whichever
+// throttles first): green <70%, amber 70–90%, red ≥90%. '' when there's no
+// usage (non-claude account, or no agent rendered a statusline recently).
+function usageDot(u: FiveDiveAccountUsage['usage'] | undefined): string {
+  if (!u) return ''
+  const five = u.fiveHour?.pct ?? null
+  const seven = u.sevenDay?.pct ?? null
+  if (five === null && seven === null) return ''
+  const worst = Math.max(five ?? 0, seven ?? 0)
+  return worst >= 90 ? '🔴' : worst >= 70 ? '🟡' : '🟢'
+}
+
 // Map the agent user (agent-<name>) back to the registry name. Returns ''
 // for non-agent users (e.g. running the plugin as `claude` on the host),
 // which the callers treat as "5dive account features unavailable".
@@ -1234,12 +1273,18 @@ function modelAndEffortKeyboard(
 // readable width (Telegram squeezes inline buttons that share a row). Final
 // "default" button clears the binding. Active option marked the same way as
 // the other pickers (see modelKeyboard above for the noop trick).
-function accountKeyboard(names: string[], current: string): InlineKeyboard {
+function accountKeyboard(
+  names: string[],
+  current: string,
+  suffixFor?: (name: string) => string,
+): InlineKeyboard {
   const kb = new InlineKeyboard()
   const all = [...names, 'default']
   all.forEach((name, i) => {
-    if (name === current) kb.text(`✓ ${name}`, 'account:noop')
-    else kb.text(name, `account:${name}`)
+    // 'default' is the clear-binding button — never an account, so no usage.
+    const label = `${name}${name === 'default' ? '' : (suffixFor?.(name) ?? '')}`
+    if (name === current) kb.text(`✓ ${label}`, 'account:noop')
+    else kb.text(label, `account:${name}`)
     if (i < all.length - 1) kb.row()
   })
   return kb
@@ -1972,7 +2017,11 @@ const commandHandlers: Record<string, CommandHandler> = {
       await ctx.reply(`Can't determine this agent's name (not running as agent-* user).`)
       return
     }
-    const [accounts, agents] = await Promise.all([read5diveAccountList(), read5diveAgentList()])
+    const [accounts, agents, usage] = await Promise.all([
+      read5diveAccountList(),
+      read5diveAgentList(),
+      read5diveAccountUsage(),
+    ])
     if (!accounts) {
       await ctx.reply(`Failed to list accounts. Try: sudo 5dive account list`)
       return
@@ -1984,11 +2033,60 @@ const commandHandlers: Record<string, CommandHandler> = {
       return
     }
     const current = agents?.find(a => a.name === me)?.authProfile || 'default'
-    const kb = accountKeyboard(accounts.map(a => a.name), current)
+    const usageByName = new Map((usage ?? []).map(u => [u.name, u.usage]))
+    const suffixFor = (name: string): string => {
+      const u = usageByName.get(name)
+      const dot = usageDot(u)
+      if (!dot) return ''
+      const five = u?.fiveHour?.pct
+      return five != null ? ` ${dot} ${Math.round(five)}%` : ` ${dot}`
+    }
+    const kb = accountKeyboard(accounts.map(a => a.name), current, suffixFor)
     const lines = [
       `Current account: ${current}`,
+      `Tap to switch · /usage for the full board`,
     ]
     await ctx.reply(lines.join('\n'), { reply_markup: kb })
+  },
+
+  // /usage — the full Anthropic 5h/7d limit board across every account (the
+  // detail view; /account shows the same signal as compact dots on the
+  // switcher buttons). null usage for an account means no bound agent
+  // rendered a statusline recently, so there are no live numbers to show.
+  usage: async ctx => {
+    const usage = await read5diveAccountUsage()
+    if (!usage) {
+      await ctx.reply(`Couldn't read usage. Try: sudo 5dive account usage`)
+      return
+    }
+    if (usage.length === 0) {
+      await ctx.reply(`No accounts configured.`)
+      return
+    }
+    const now = Date.now()
+    const STALE_MS = 20 * 60 * 1000
+    const fmtReset = (resetsAt?: number): string =>
+      resetsAt ? formatDuration(Math.max(0, resetsAt * 1000 - now)) : '?'
+    const lines: string[] = ['📊 Account usage', '']
+    for (const a of usage) {
+      const u = a.usage
+      if (!u || (u.fiveHour == null && u.sevenDay == null)) {
+        lines.push(`▫️ ${a.name} — no recent data`)
+        continue
+      }
+      const five = u.fiveHour?.pct
+      const seven = u.sevenDay?.pct
+      const worst = Math.max(five ?? 0, seven ?? 0)
+      const dot = worst >= 90 ? '🔴' : worst >= 70 ? '🟡' : '🟢'
+      const stale = now - u.asOf * 1000 > STALE_MS
+      lines.push(`${dot} ${a.name}`)
+      lines.push(
+        `   5h ${five != null ? Math.round(five) + '%' : '—'} (resets ${fmtReset(u.fiveHour?.resetsAt)})`
+        + ` · 7d ${seven != null ? Math.round(seven) + '%' : '—'} (resets ${fmtReset(u.sevenDay?.resetsAt)})`,
+      )
+      lines.push(`   as of ${formatDuration(now - u.asOf * 1000)} ago via ${u.source}${stale ? ' ⚠️ stale' : ''}`)
+    }
+    await ctx.reply(lines.join('\n'))
   },
 
   // /goal — proxy of Claude Code's /loop. `/goal <text>` injects /loop <text>
