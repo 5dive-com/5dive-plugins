@@ -35,6 +35,7 @@ import { renderRoster, renderLog, renderLineage, renderVerify, COUNCIL_BUTTONS, 
 import { resolveQuestionTap } from './hooks/lib/question-bridge'
 import { sweepStaleRelayIn } from './hooks/lib/relay-quarantine'
 import { summarizeNeeds, reconcileBanner, type BannerState, type NeedSummary } from './banner'
+import { installLifecycle } from './lifecycle.ts'
 import {
   appendMessage as msglogAppend,
   readMessages as msglogRead,
@@ -1621,17 +1622,21 @@ process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
 process.on('SIGHUP', shutdown)
 
-// Orphan watchdog: stdin events above don't reliably fire when the parent
-// chain (`bun run` wrapper → shell → us) is severed by a crash. Poll for
-// reparenting (POSIX) or a dead stdin pipe and self-terminate.
-const bootPpid = process.ppid
-setInterval(() => {
-  const orphaned =
-    (process.platform !== 'win32' && process.ppid !== bootPpid) ||
-    process.stdin.destroyed ||
-    process.stdin.readableEnded
-  if (orphaned) shutdown()
-}, 5000).unref()
+// DIVE-3752 replaced the inline orphan watchdog that used to live here.
+//
+// It read, in full:
+//     const bootPpid = process.ppid
+//     setInterval(() => {
+//       const orphaned =
+//         (process.platform !== 'win32' && process.ppid !== bootPpid) || ...
+//
+// and its ppid clause COULD NOT FIRE: measured 2026-08-26, Bun caches
+// `process.ppid` at boot and never refreshes it, so an orphan compares its
+// dead parent's pid against itself forever. This plugin's zero-orphan record
+// came from the stdin handlers above, not from that comparison — which is the
+// one case the comparison existed to cover. ./lifecycle.ts reads the kernel's
+// answer instead, and is the same module every other plugin now installs.
+installLifecycle({ channel: 'telegram', stateDir: STATE_DIR, cleanup: shutdown })
 
 // Find the most-recently-updated claude session file. Each running claude
 // process writes ~/.claude/sessions/<pid>.json with status/uptime metadata.

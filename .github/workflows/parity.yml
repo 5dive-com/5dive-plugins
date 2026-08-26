@@ -42,3 +42,18 @@ jobs:
       # its generator config (or the base) — the structural successor to the
       # hand-kept parity above.
       - run: bun generator/generate.ts --check
+      # DIVE-3752: entry-point PARSE gate. Neither step above parses a plugin
+      # entry point — `bun test` never imports one (CI has no plugin deps) and
+      # the generator is a text transform. Iteration 1 of DIVE-3752 shipped a
+      # `plugins/telegram/server.ts` with an import nested inside another
+      # import's brace list and both steps were green. `--no-bundle` transpiles
+      # without resolving a single specifier, so this needs no node_modules.
+      # test/entrypoint-parse.test.ts asserts the same thing from `bun test`;
+      # this step exists so the failure has a name in the checks list.
+      - name: entry points parse
+        run: |
+          rc=0
+          for f in $(find plugins -name '*.ts' -not -path '*/node_modules/*' | sort); do
+            bun build --no-bundle "$f" --outfile=/dev/null >/dev/null || { echo "PARSE FAILED: $f"; rc=1; }
+          done
+          exit $rc

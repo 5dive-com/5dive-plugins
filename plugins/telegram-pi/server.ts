@@ -51,6 +51,7 @@ import {
 import { randomBytes } from 'crypto'
 import { homedir } from 'os'
 import { join, sep } from 'path'
+import { installLifecycle } from './lifecycle.ts'
 
 const PLUGIN_VERSION = (() => {
   try {
@@ -1970,6 +1971,14 @@ function shutdown() {
 }
 process.on('SIGTERM', shutdown)
 process.on('SIGINT',  shutdown)
+
+// DIVE-3752: signals and stdin EOF are not sufficient. When the parent chain
+// (`claude` → `bun run` → us) is severed, neither fires reliably — but POSIX
+// reparents us, so the ppid clause in ./lifecycle.ts catches it. No fork had
+// that clause; only `plugins/telegram` did.
+// This fork's own shutdown() stops the bot but never calls process.exit, so
+// installLifecycle's force-exit backstop is what actually ends the process.
+installLifecycle({ channel: 'telegram-pi', stateDir: STATE_DIR, cleanup: shutdown })
 
 // DIVE-1503/1558 pinned-banner store I/O. Heuristic state: a lost read/write only
 // costs one redundant banner send, never worth failing anything over.

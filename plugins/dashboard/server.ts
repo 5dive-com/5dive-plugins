@@ -30,6 +30,7 @@ import {
 import { readFileSync, mkdirSync, readdirSync, unlinkSync, watch, chmodSync, copyFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { installLifecycle } from './lifecycle.ts'
 
 let PLUGIN_VERSION = '?'
 try {
@@ -352,6 +353,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const j = (await res.json().catch(() => null)) as { id?: number } | null
   return { content: [{ type: 'text', text: `sent (id: ${j?.id ?? '?'})` }] }
 })
+
+// DIVE-3752: same gap as buzz — this server ends in long-lived timers with no
+// signal handler, no stdin handler and no exit path, so a severed parent chain
+// leaves it running. The interval below is `.unref()`d, which does NOT save it:
+// the MCP stdio transport holds stdin open and keeps the loop alive.
+installLifecycle({ channel: 'dashboard', stateDir: STATE_DIR })
 
 await mcp.connect(new StdioServerTransport())
 // Claude Code registers channel-notification handling shortly AFTER the MCP

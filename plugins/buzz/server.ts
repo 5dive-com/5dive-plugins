@@ -27,6 +27,7 @@ import { schnorr } from '@noble/curves/secp256k1'
 import { npubEncode, encoderIsSane, shouldDeliver, parseDmList, type BuzzEvent } from './mention.ts'
 import { makeGuardedTick, mergeTargets, type PollTarget } from './poller.ts'
 import { readVerdict, hostAlreadyDelivered, trustLabel, type Verdict } from './bridge.ts'
+import { installLifecycle } from './lifecycle.ts'
 
 const exec = promisify(execFile)
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'buzz')
@@ -419,6 +420,14 @@ function startPoller() {
   fire()
   setInterval(fire, interval)
 }
+
+// DIVE-3752: install the orphan watchdog that DIVE-3486 compiled and only
+// `plugins/telegram` ever received. Without it this file ended in a bare
+// `setInterval` with zero `process.on`, zero stdin handler and zero `exit`, and
+// leaked one live poller per restart — 22 of them on one seat over six days.
+// It must be installed BEFORE the poller starts: the window between the first
+// `fire()` and the watchdog arming is a window in which an orphan is created.
+installLifecycle({ channel: 'buzz', stateDir: STATE_DIR })
 
 startPoller()
 await mcp.connect(new StdioServerTransport())
