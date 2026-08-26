@@ -36,6 +36,7 @@ import { TNA_RE, resolveTnaAnswer, OPT_RE, optionChoices, parseOptions, tapEvide
 // (or collision with) whatever each plugin already imports from 'fs'.
 import { appendFileSync as tapAppendFileSync, mkdirSync as tapMkdirSync, statSync as tapStatSync, renameSync as tapRenameSync } from 'fs'
 import { summarizeNeeds, reconcileBanner, type BannerState, type NeedSummary } from './banner'
+import { installLifecycle } from './lifecycle.ts'
 
 const PLUGIN_VERSION = (() => {
   try {
@@ -2855,6 +2856,12 @@ function shutdown() {
 }
 process.on('SIGTERM', shutdown)
 process.on('SIGINT',  shutdown)
+
+// DIVE-3752: signals and stdin EOF are not sufficient. When the parent chain
+// (`claude` → `bun run` → us) is severed, neither fires reliably — but POSIX
+// reparents us, so the ppid clause in ./lifecycle.ts catches it. No fork had
+// that clause; only `plugins/telegram` did.
+installLifecycle({ channel: 'telegram-agy', stateDir: STATE_DIR, cleanup: shutdown })
 
 // DIVE-1251: exit when our MCP parent (the agy/TUI session) disconnects. On
 // /clear, the TUI RE-INITS its MCP servers — it disconnects this server.ts and

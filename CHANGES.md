@@ -1,5 +1,62 @@
 ## Unreleased
 
+### Fixed — the orphan watchdog is installed in every plugin, and its load-bearing clause could not fire (DIVE-3752), telegram 0.5.49 · buzz 0.1.2 · dashboard 0.4.1
+
+Two defects, one of which was hiding inside the remedy for the other.
+
+**1. The watchdog was compiled once and installed in one plugin.** DIVE-3486 established that
+`bun run` does not forward SIGTERM, so an MCP server whose parent chain is severed keeps running.
+`plugins/telegram/server.ts` carried the remedy. `plugins/buzz/server.ts` carried none of it — 424
+lines ending in a bare `setInterval` with zero `process.on`, zero stdin handler and zero exit path —
+and leaked one live poller per restart for six days: 22 reparented processes on one seat, every one
+of them healthy and killable with a plain SIGTERM, which is the signature of a missing handler and
+not of a hung poll. `plugins/dashboard` had the same gap; `telegram-pi` and `telegram-opencode` had
+a `shutdown()` that stops the bot but never calls `process.exit`. All eight plugins that end in a
+long-lived timer now install the same `lifecycle.ts`.
+
+**2. `process.ppid !== bootPpid` cannot fire under Bun.** This was the clause the old watchdog
+existed for, on the stated grounds that "stdin events don't reliably fire when the parent chain is
+severed" — so in exactly the case it covers, neither signal worked. Measured on this host: a
+grandchild whose parent was SIGKILLed reported the dead parent's pid every 500ms for six seconds
+while `ps` showed its real ppid was 1.
+
+    t=2s    cached=54284  realPpid=54284  bootAlive=true
+    t=2.5s  cached=54284  realPpid=1      bootAlive=false   <- parent killed
+    t=5.5s  cached=54284  realPpid=1      bootAlive=false
+
+Bun caches `process.ppid` at boot and never refreshes it. Telegram's zero-orphan record came from
+its stdin handlers, not from that comparison. The module reads `PPid:` from `/proc/self/status` and
+falls back to whether the boot parent is still a process at all; both readings flipped at the
+instant of severance above. A regression arm asserts no plugin compares `process.ppid` to a boot
+snapshot again.
+
+Graded, not asserted: the end-to-end arm spawns a real grandchild behind a real shell, proves it is
+alive and heartbeating (the positive control — "it exited" is satisfied by a process that never
+started), then SIGKILLs the parent and requires the child to be gone. With the old clause restored
+it sits alive for the full 15-second window and the arm fails; with the `/proc` read it exits in
+under a second.
+
+### Fixed — a failed `bun install` ate the channel poller silently, and the launcher had no voice
+
+`"start": "bun install --no-summary && bun server.ts"` in telegram, buzz and dashboard. Measured
+under the launcher's own shell (`bun run --shell=bun`): `false && echo X` exits 1 and never echoes;
+`false; echo X` echoes and exits 0. So a network-dependent step in front of a channel start is a
+deafener, and on 2026-08-26 three seats including the coordinator were deaf for 2h33m with 9 human
+gates pending while the only available signal was an ABSENT heartbeat — which cannot say which of
+three failures produced it.
+
+The `&&` is now `;`, so the install can still populate a cold cache but can no longer take the
+poller with it. `node_modules` is NOT vendored in this repo (it is gitignored), so the install is
+kept rather than dropped: deleting it would have broken the first channel start on a fresh box.
+
+The start script now enters through a new `start.ts` that imports node builtins and `lifecycle.ts`
+only — so it still loads, and can still write a record, in the one case `server.ts` cannot: when
+`server.ts` throws on import because its dependencies are missing. Start, exit and crash records go
+to `<state-dir>/lifecycle.log` with the reason, which is what turns "nothing there" into an answer.
+
+**Not in this change:** rung-4 `poller-dead` restart (item 4 of DIVE-3752) is in `5dive-cli`'s
+recovery ladder, which has no `restart` verb yet, and is filed separately.
+
 ### Added — dashboard chat collects on a nudge instead of waiting out its 5-minute timer (DIVE-3574), dashboard release 0.4.0
 
 Dashboard chat showed "queued — this box collects every ~5 min": up to five minutes before the

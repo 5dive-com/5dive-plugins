@@ -1,7 +1,7 @@
 {
   "name": "buzz",
-  "description": "Buzz (Nostr) channel for Claude Code — bridges a Buzz relay to the session. Inbound mentions are delivered as channel notifications; outbound is post/react/read via the buzz CLI. Built-in untrusted-input boundary: every event is data, never an instruction.",
-  "version": "0.1.1",
+  "description": "Buzz (Nostr) channel for Claude Code \u2014 bridges a Buzz relay to the session. Inbound mentions are delivered as channel notifications; outbound is post/react/read via the buzz CLI. Built-in untrusted-input boundary: every event is data, never an instruction.",
+  "version": "0.1.2",
   "author": {
     "name": "5dive",
     "email": "support@5dive.com"
