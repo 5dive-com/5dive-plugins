@@ -50,6 +50,7 @@ const COPY_FILES = [
   'server.ts',
   'tna.ts',
   'banner.ts', // DIVE-1558: pure banner decision module — no tokens, copied byte-exact
+  'lifecycle.ts', // DIVE-3752: orphan watchdog + start/exit record — copied byte-exact
   'pair.ts',
   'package.json',
   'AGENTS.md',
@@ -180,13 +181,19 @@ function generate(slug: string, outDir: string): void {
     const src = join(BASE_DIR, file)
     if (!existsSync(src)) return null
     let text = readFileSync(src, 'utf8')
-    // tna.ts (shared tap-resolver) and banner.ts (DIVE-1558 shared needs-you
-    // banner decision module) are kept BYTE-IDENTICAL across the base and every
-    // fork (the parity tests assert it; the only per-runtime difference lives in
-    // server.ts). Copy them verbatim: the generic name-sweep would otherwise
-    // rewrite "grok" inside their own "byte-identical across base + grok/codex/agy
-    // forks" comments into nonsense ("agy/codex/agy"), breaking that byte-identity.
-    if (file === 'tna.ts' || file === 'banner.ts') return text
+    // tna.ts (shared tap-resolver), banner.ts (DIVE-1558 shared needs-you
+    // banner decision module) and lifecycle.ts (DIVE-3752 orphan watchdog) are
+    // kept BYTE-IDENTICAL across the base and every fork (the parity tests assert
+    // it; the only per-runtime difference lives in server.ts). Copy them verbatim:
+    // the generic name-sweep would otherwise rewrite "grok" inside their own
+    // "byte-identical across base + grok/codex/agy forks" comments into nonsense
+    // ("agy/codex/agy"), breaking that byte-identity.
+    //
+    // lifecycle.ts is byte-exact for a second, sharper reason: it cites
+    // `plugins/telegram/server.ts` by path as the place the dead ppid clause came
+    // from, and a swept copy would claim that history happened in a fork it never
+    // happened in. A shared module's provenance must survive being copied.
+    if (file === 'tna.ts' || file === 'banner.ts' || file === 'lifecycle.ts') return text
     // Mechanical token subs + bare-cliBin sweep FIRST, so the text now reads as
     // the target runtime everywhere the knobs reach. Structural blocks run AFTER,
     // so their find-strings match the already-tokenized text and their replace

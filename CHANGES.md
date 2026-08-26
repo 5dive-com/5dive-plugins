@@ -54,6 +54,14 @@ only — so it still loads, and can still write a record, in the one case `serve
 `server.ts` throws on import because its dependencies are missing. Start, exit and crash records go
 to `<state-dir>/lifecycle.log` with the reason, which is what turns "nothing there" into an answer.
 
+The five telegram forks are GENERATED, not hand-maintained: `bun generator/generate.ts --check` is
+the second CI step and it rejected the first push, because a new shared module that is not in the
+generator's copy set exists in the committed fork and not in the generated one. `lifecycle.ts` joins
+`tna.ts` and `banner.ts` in the byte-exact copy set — not name-swept, because the sweep would rewrite
+`telegram` inside the module's own comments and break the byte-identity the parity arm asserts, and
+because those comments cite `plugins/telegram/server.ts` by path as where the dead clause came from.
+A swept copy would claim that history happened in a fork it never happened in.
+
 **Not in this change:** rung-4 `poller-dead` restart (item 4 of DIVE-3752) is in `5dive-cli`'s
 recovery ladder, which has no `restart` verb yet, and is filed separately.
 
