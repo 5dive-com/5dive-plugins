@@ -35,8 +35,8 @@ import { renderRoster, renderLog, renderLineage, renderVerify, COUNCIL_BUTTONS, 
 import { resolveQuestionTap } from './hooks/lib/question-bridge'
 import { sweepStaleRelayIn } from './hooks/lib/relay-quarantine'
 import { summarizeNeeds, reconcileBanner, type BannerState, type NeedSummary } from './banner'
-import {
 import { installLifecycle } from './lifecycle.ts'
+import {
   appendMessage as msglogAppend,
   readMessages as msglogRead,
   formatRecent as msglogFormat,
