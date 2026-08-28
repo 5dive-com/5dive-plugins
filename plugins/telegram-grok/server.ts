@@ -2691,6 +2691,15 @@ const LAST_STALL_ALERT_FILE = join(STATE_DIR, 'last-stall-alert.stamp')
 // recovers (a waiter re-parks). Persisted to a stamp so a server bounce
 // mid-stall doesn't re-ping.
 let stallAlerted = existsSync(LAST_STALL_ALERT_FILE)
+// The pane as it looked when we alerted. Written next to the stamp so the NEXT
+// occurrence is diagnosable from the box itself instead of from a forwarded
+// screenshot (DIVE-3786: the customer report we had was a photo of a chat).
+const LAST_STALL_PANE_FILE = join(STATE_DIR, 'last-stall-pane.txt')
+let _lastPane = ''
+// Set by kickListenLoop() when it types a re-arm prompt and then CANNOT observe
+// its own Enter landing. This is the one "wedged" state we actually measure, as
+// opposed to inferring it from a pane scrape that matched none of our patterns.
+let rearmSubmitFailed = false
 
 function capitalize(s: string): string { return s.charAt(0).toUpperCase() + s.slice(1) }
 
@@ -2704,6 +2713,7 @@ function detectStallCause(): { cause: string; detail: string } {
     const pane: string = cp.execFileSync('tmux',
       ['capture-pane', '-t', `agent-${name}`, '-p'],
       { timeout: 5_000, encoding: 'utf8' })
+    _lastPane = pane
     const tail = pane.slice(-4000)
     // Model/credit quota exhausted (e.g. Antigravity "Individual quota reached").
     if (/quota reached|out of (?:credits|quota)|usage limit|rate limit exceeded/i.test(tail)) {
@@ -2714,10 +2724,32 @@ function detectStallCause(): { cause: string; detail: string } {
     if (/\b(sign in|log ?in|authenticate|re-?authenticate|oauth|enter your api key)\b/i.test(tail)) {
       return { cause: 'auth expired — sitting at a login screen', detail: 're-run `5dive agent auth …` for this agent' }
     }
-    return { cause: 'listen loop wedged', detail: 'agent is idle outside wait_for_message and won’t re-arm' }
+    // Our own re-arm keystrokes went in and we could not see the submit land.
+    // Unlike everything below this line, that IS an observation.
+    if (rearmSubmitFailed) {
+      return {
+        cause: 'stuck at the input prompt',
+        detail: 'the agent is idle and our re-arm keystrokes are not being submitted — try /restart',
+      }
+    }
+    // Nothing matched. This branch means exactly "it stopped answering and none
+    // of the patterns above fired" — so say that, and show the owner what is
+    // actually on the screen. Do NOT name a mechanism we never tested: the old
+    // text here claimed the listen loop was wedged and that the agent would not
+    // re-arm, neither of which this function looks at (DIVE-3786).
+    return { cause: 'not responding — cause unknown', detail: paneTailSummary(tail) }
   } catch {
     return { cause: 'not responding', detail: 'could not read the agent pane' }
   }
+}
+
+// The last few non-empty screen lines, for an alert that cannot name a cause.
+// Trimmed hard: this goes in a Telegram message, not a log.
+function paneTailSummary(tail: string): string {
+  const lines = tail.split('\n').map((l) => l.replace(/\s+$/, '')).filter((l) => l.trim() !== '')
+  const last = lines.slice(-3).map((l) => (l.length > 100 ? l.slice(0, 99) + '…' : l))
+  if (last.length === 0) return 'the agent screen is blank'
+  return 'Last lines on its screen:\n' + last.map((l) => '  ' + l).join('\n')
 }
 
 // detectStallCause does a synchronous pane capture; cache it briefly so a burst
@@ -2751,29 +2783,89 @@ function sendStallAlert(): void {
   }
   stallAlerted = true
   try { writeFileSync(LAST_STALL_ALERT_FILE, String(Date.now())) } catch {}
+  // Keep the evidence on the box. Without this the only record of what the
+  // agent was sitting on is whatever the owner happens to screenshot.
+  try {
+    writeFileSync(LAST_STALL_PANE_FILE,
+      `# ${new Date().toISOString()} ${name} — ${cause}: ${detail}\n${_lastPane}`)
+  } catch {}
   process.stderr.write(`telegram-grok: stall alert sent (${cause}) to ${owners.length} owner(s)\n`)
 }
 
 // Loop recovered — drop the dedup flag so a future stall alerts again.
 function clearStallAlert(): void {
+  rearmSubmitFailed = false
   if (!stallAlerted) return
   stallAlerted = false
   try { if (existsSync(LAST_STALL_ALERT_FILE)) unlinkSync(LAST_STALL_ALERT_FILE) } catch {}
 }
 
+// ── Re-arm kick ─────────────────────────────────────────────────────────────
+// Typing into a live TUI has two silent failure modes, and the old version of
+// this function had both (DIVE-3786):
+//
+//   1. `send-keys -l` APPENDS. If a previous delivery's Enter was dropped, its
+//      text is still sitting in the composer, and every later kick concatenates
+//      onto that stranded line instead of replacing it. Since the recovery path
+//      IS the delivery path, the failure repairs itself into a worse one.
+//   2. The Enter was fire-and-forget — the callback discarded the result, right
+//      under a comment saying the TUI "occasionally drops an Enter".
+//
+// So now: clear the composer first, submit as its own call, and CHECK. A landed
+// Enter clears the composer and starts a turn, so the pane must change; byte-
+// identical panes before and after mean the keystroke went nowhere.
+const REARM_TYPE_SETTLE_MS = 400
+const REARM_SUBMIT_SETTLE_MS = 700
+
+function capturePaneSync(name: string): string | null {
+  try {
+    const cp = require('child_process')
+    return cp.execFileSync('tmux', ['capture-pane', '-t', `agent-${name}`, '-p'],
+      { timeout: 5_000, encoding: 'utf8' }) as string
+  } catch { return null }
+}
+
+function sendKeysAsync(name: string, args: string[]): Promise<boolean> {
+  return new Promise((resolve) => {
+    const cp = require('child_process')
+    cp.execFile('tmux', ['send-keys', '-t', `agent-${name}`, ...args],
+      { timeout: 5_000 }, (err: any) => {
+        if (err) process.stderr.write(`telegram-grok: rearm send-keys failed: ${err.message}\n`)
+        resolve(!err)
+      })
+  })
+}
+
+const rearmSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+// One clear-type-submit-verify attempt. Returns true only if the submit was
+// OBSERVED to change the pane; a pane we cannot read counts as unconfirmed.
+async function kickListenLoopOnce(name: string): Promise<boolean> {
+  // C-u kills the composer line. Verified against a live codex TUI on 2026-08-28:
+  // typing a probe string then sending C-u returns the composer to its
+  // placeholder hint, i.e. genuinely empty.
+  if (!(await sendKeysAsync(name, ['C-u']))) return false
+  if (!(await sendKeysAsync(name, ['-l', REARM_KICK_TEXT]))) return false
+  await rearmSleep(REARM_TYPE_SETTLE_MS)
+  const typed = capturePaneSync(name)
+  if (!(await sendKeysAsync(name, ['Enter']))) return false
+  await rearmSleep(REARM_SUBMIT_SETTLE_MS)
+  const after = capturePaneSync(name)
+  if (typed === null || after === null) return false
+  return after !== typed
+}
+
 function kickListenLoop(): void {
   const name = agentName()
   if (name === 'unknown') return
-  const cp = require('child_process')
-  // Type the prompt as a literal line, then submit. Two send-keys calls because
-  // the TUI occasionally drops an Enter folded into the same call.
-  cp.execFile('tmux', ['send-keys', '-t', `agent-${name}`, '-l', REARM_KICK_TEXT],
-    { timeout: 5_000 }, (err: any) => {
-      if (err) { process.stderr.write(`telegram-grok: rearm send-keys failed: ${err.message}\n`); return }
-      setTimeout(() => {
-        cp.execFile('tmux', ['send-keys', '-t', `agent-${name}`, 'Enter'], { timeout: 5_000 }, () => {})
-      }, 400)
-    })
+  void (async () => {
+    if (await kickListenLoopOnce(name)) { rearmSubmitFailed = false; return }
+    // A busy TUI can swallow one Enter; a wedged one swallows every Enter.
+    process.stderr.write('telegram-grok: rearm submit not observed, retrying once\n')
+    if (await kickListenLoopOnce(name)) { rearmSubmitFailed = false; return }
+    rearmSubmitFailed = true
+    process.stderr.write('telegram-grok: rearm submit still not observed — agent is not accepting input\n')
+  })()
 }
 
 // Newest agent-turn mtime (ms) — the "still doing real work" signal used by the
