@@ -89,7 +89,8 @@ function loadConnectordToken(): string {
   // override and is never reloaded — that seat is back in the DIVE-3810 bug
   // with no signal. No live box is affected today: pairing rotates the FILE,
   // and nothing in the provision or agent-create path writes CONNECTORD_TOKEN
-  // into that .env at all — the box token is written once to
+  // into that .env at all (agent-create passes the dashboard channel an EMPTY
+  // token on purpose, DIVE-841) — the box token is written once to
   // /etc/5dive/connectord.env by the installer and rotated there by shelld, so
   // this branch is only ever taken by a test or a deliberate off-box run.
   // Fixing it means deciding that the .env copy is rotatable too, which is a
