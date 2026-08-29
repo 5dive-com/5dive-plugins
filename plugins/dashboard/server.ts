@@ -27,7 +27,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { readFileSync, mkdirSync, readdirSync, unlinkSync, watch, chmodSync, copyFileSync } from 'fs'
+import { readFileSync, mkdirSync, readdirSync, unlinkSync, watch, chmodSync, copyFileSync, openSync, closeSync, writeSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { installLifecycle } from './lifecycle.ts'
@@ -47,6 +47,16 @@ const AGENT_INBOX_DIR = join(STATE_DIR, 'agent-inbox')
 // purpose: a nudge carries no payload and must never be mistaken for a message
 // drop-file, so the two ingesters can never read each other's files.
 const COLLECT_NOW_DIR = join(STATE_DIR, 'collect-now')
+// DIVE-3809: the drain's `draining`/`rerun` guard below is PER-PROCESS. Two
+// plugin processes for the same agent (an overlapping restart, a stray
+// supervisor respawn) each fetch the SAME pending rows and push every message
+// into the session twice, because the ack lands only after the notifications
+// are sent. This file is the cross-process arm of that guard: O_EXCL create
+// wins the drain, everyone else skips this pass and picks it up on the next
+// sweep. Refuted as the CAUSE of the loss DIVE-3806 observed (lifecycle.log
+// showed exactly one live process across that window) — it is still a real
+// race, and it is scope 3 of this row.
+const DRAIN_LOCK = join(STATE_DIR, 'pending-drain.lock')
 mkdirSync(AGENT_INBOX_DIR, { recursive: true, mode: 0o700 })
 mkdirSync(COLLECT_NOW_DIR, { recursive: true, mode: 0o700 })
 
@@ -206,10 +216,17 @@ function startCollectNowWatch(): void {
 // DIVE-848 offline heal: a message sent while this box was unreachable never
 // produced a drop file — it sits in the control plane with delivered_at NULL.
 // Pull those on boot (and on a slow sweep), push them into the session, then
-// ack so they stamp delivered. Ack only AFTER the notifications are sent; a
+// ack so they stamp COLLECTED. Ack only AFTER the notifications are sent; a
 // crash in between redelivers rather than losing the message. A row whose
-// drop landed but whose delivered-stamp write failed may arrive twice — rare
+// drop landed but whose collected-stamp write failed may arrive twice — rare
 // and preferable to silence.
+// DIVE-3809: the ack no longer stamps delivered_at. It could never attest
+// delivery, and stamping the column `/pending` reads meant one wrong ack
+// deleted the only copy. A collected row is now merely hidden for a TTL and
+// comes back, bounded by an attempt count. Note the consequence for the
+// empty-text branch below: it acks a row it never pushed, so such a row is
+// re-offered until the attempt bound retires it — bounded and visible, where
+// before it was silently destroyed.
 // DIVE-3574: drainPending is now reachable from three places (boot, the 5-min
 // timer, and a collect nudge that can fire several times a second while someone
 // types in the dashboard) where it used to be reachable from two that could
@@ -220,11 +237,63 @@ function startCollectNowWatch(): void {
 // landed after the fetch from waiting out the full timer.
 let draining = false
 let rerun = false
+
+// A drain that dies mid-flight (SIGKILL, box reboot) leaves the lock file
+// behind, and a stale lock that nothing clears would wedge the collect path
+// permanently — the exact failure shape this row exists to remove. So the lock
+// is TIME-BOUNDED: older than this and it is treated as abandoned and broken.
+// One drain is a fetch + N notifications + an ack, all with short timeouts;
+// two minutes is far past any healthy pass.
+const DRAIN_LOCK_STALE_MS = 2 * 60_000
+
+// Returns true if THIS process now holds the lock. Never throws: a filesystem
+// that cannot support the lock must degrade to today's per-process-only
+// behaviour, not stop the customer's message from being collected.
+function acquireDrainLock(): boolean {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(DRAIN_LOCK, 'wx')
+      try { writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`) } catch {}
+      closeSync(fd)
+      return true
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        process.stderr.write(`dashboard channel: drain lock unavailable (${err}); per-process guard only\n`)
+        return true
+      }
+      // Held. Break it only if it is provably stale, then retry the create
+      // once — if another process wins that race, we simply skip this pass.
+      try {
+        const age = Date.now() - statSync(DRAIN_LOCK).mtimeMs
+        if (age <= DRAIN_LOCK_STALE_MS) return false
+        process.stderr.write(`dashboard channel: breaking stale drain lock (age ${Math.round(age / 1000)}s)\n`)
+        unlinkSync(DRAIN_LOCK)
+      } catch { return false }
+    }
+  }
+  return false
+}
+
+function releaseDrainLock(): void {
+  try { unlinkSync(DRAIN_LOCK) } catch {}
+}
+
 async function drainPending(): Promise<void> {
   if (draining) { rerun = true; return }
   draining = true
   try {
-    await drainPendingOnce()
+    // Cross-process (DIVE-3809). Skipping is safe and NOT a lost message: the
+    // holder is draining the same rows right now, and anything it misses is
+    // re-offered by the control plane once the collect TTL expires.
+    if (!acquireDrainLock()) {
+      process.stderr.write('dashboard channel: another process holds the drain lock; skipping this pass\n')
+      return
+    }
+    try {
+      await drainPendingOnce()
+    } finally {
+      releaseDrainLock()
+    }
   } finally {
     draining = false
   }
@@ -265,7 +334,7 @@ async function drainPendingOnce(): Promise<void> {
       })
       acked.push(m.id)
     } catch (err) {
-      process.stderr.write(`dashboard channel: pending deliver failed for ${m.id}: ${err}\n`)
+      process.stderr.write(`dashboard channel: pending push failed for ${m.id}: ${err}\n`)
     }
   }
   if (acked.length === 0) return
@@ -275,9 +344,14 @@ async function drainPendingOnce(): Promise<void> {
       headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ agent: AGENT, ids: acked }),
     })
-    process.stderr.write(`dashboard channel: healed ${acked.length} undelivered message(s)\n`)
+    // DIVE-3809: "collected", not "delivered" or "healed". This ack attests
+    // that the notification's bytes entered the stdout pipe — the SDK's send()
+    // has no reject path, and a client with nothing subscribed drops the
+    // notification silently — so it can never say the session displayed it.
+    // The control plane now re-offers a collected row whose TTL expires.
+    process.stderr.write(`dashboard channel: collected ${acked.length} pending message(s) (collection is not display)\n`)
   } catch (err) {
-    process.stderr.write(`dashboard channel: pending ack failed (will redeliver next boot): ${err}\n`)
+    process.stderr.write(`dashboard channel: pending ack failed (row stays uncollected; re-offered next sweep): ${err}\n`)
   }
 }
 
