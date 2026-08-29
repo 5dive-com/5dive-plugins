@@ -82,6 +82,18 @@ const TOKEN_FILE = process.env.CONNECTORD_ENV_FILE ?? '/etc/5dive/connectord.env
 function loadConnectordToken(): string {
   // An explicit env override stays authoritative and is never reloaded: it is
   // set by a test or an off-box run, and nothing rotates it.
+  //
+  // RESIDUAL, stated rather than fixed: the ENV_FILE loader above copies
+  // CONNECTORD_TOKEN out of ~/.claude/channels/dashboard/.env into process.env
+  // BEFORE this runs, so a token that arrives that way is read here as an
+  // override and is never reloaded — that seat is back in the DIVE-3810 bug
+  // with no signal. No live box is affected today: pairing rotates the FILE,
+  // and nothing in the provision or agent-create path writes CONNECTORD_TOKEN
+  // into that .env at all — the box token is written once to
+  // /etc/5dive/connectord.env by the installer and rotated there by shelld, so
+  // this branch is only ever taken by a test or a deliberate off-box run.
+  // Fixing it means deciding that the .env copy is rotatable too, which is a
+  // different question from this one.
   if (process.env.CONNECTORD_TOKEN) return process.env.CONNECTORD_TOKEN
   try {
     for (const line of readFileSync(TOKEN_FILE, 'utf8').split('\n')) {
