@@ -1,5 +1,54 @@
 ## Unreleased
 
+### Fixed — pairing a phone rotated the box token and the dashboard chat plugin never re-read it (DIVE-3810), dashboard 0.4.2
+
+`plugins/dashboard/server.ts` read `CONNECTORD_TOKEN` once at module scope and held it for the life
+of the process. `/etc/5dive/connectord.env` is rewritten while the agent is running — pairing a phone
+does it — and from that instant the plugin held a dead credential for all three control-plane calls:
+`GET /server/messages/pending` (collect), `POST /server/messages/pending/ack`, and
+`POST /server/messages/event` (the agent's outbound reply). Chat died in BOTH directions and stayed
+dead until something restarted the agent.
+
+Measured on glossy-flint 2026-08-29: the env file's mtime was 17:23:20, the plugin had booted at
+16:19:54.9, and the on-disk token was good (a hand `curl` with it returned 200). Five messages sent
+at 17:30 never reached the transcript and all five stayed `delivered_at IS NULL` — nothing was lost,
+nothing was falsely stamped. Buzz on the same box and the same claude process kept working
+throughout, because it does not use this token, so the transport was never implicated.
+`5dive agent restart` at 17:36:48 drained pending 5 → 0 in fifteen seconds.
+
+The token is now mutable and every call goes through one `authedFetch`, which on a 401/403 re-reads
+`/etc/5dive/connectord.env` and retries once — but only if the token actually changed, so a
+genuinely revoked credential cannot spin. `authedFetch` is the only `fetch(` and the only
+`authorization` header in the file, so no call site can hold a stale credential. The ack path now
+checks `res.ok`; it used to print "healed N" after a 401.
+
+**The failure also had no surface.** The single signal was one stderr line inside an MCP stdio
+socket, written to no file on the box, while the control plane looked healthy — the messages sit in
+`/pending` exactly as an ordinary undelivered queue does. `lifecycle.ts` gains an `auth` event: a
+channel whose credential died mid-run is neither started, exited nor crashed, so without an event of
+its own that state was recorded as `nothing`, which is what that file exists to refuse. One record
+per episode, one on recovery, on disk.
+
+The other seven plugins take the `LifecycleEvent` union widening and its comment and nothing else —
+a type-only change with no runtime behaviour, so their versions are deliberately unchanged. All
+eight copies of `lifecycle.ts` stay byte-identical.
+
+Graded by `test/dashboard-token-rotation.test.ts`, which drives the real `server.ts` as a subprocess
+against a stub control plane that 401s a stale bearer and rotates the token file under the running
+process: inbound recovers with no restart, the reply tool recovers too (the mute half), the record
+appears exactly once per episode, and all three call sites are asserted to route through the helper.
+Deleting the reload+retry reds three of the four arms.
+
+Not covered: whether pairing should rotate this token at all is a control-plane question and is not
+in this change; blast radius across the fleet is unmeasured (no prod database access from this
+seat), and restarting an agent re-reads the file and remains the safe interim sweep. One residual is
+stated in the PR: the `STATE_DIR/.env` loader copies `CONNECTORD_TOKEN` into `process.env` before the
+file is read, and an env-set token is deliberately never reloaded. No live box is affected: nothing
+in the provision or agent-create path writes `CONNECTORD_TOKEN` into that `.env`, the installer
+writes the box token once to `/etc/5dive/connectord.env` and shelld rotates it there, so that branch
+is only ever taken by a test or a deliberate off-box run — but a seat that ever acquires a non-empty
+`CONNECTORD_TOKEN` in that `.env` is back in the original bug with no signal.
+
 ### Fixed — the orphan watchdog is installed in every plugin, and its load-bearing clause could not fire (DIVE-3752), telegram 0.5.49 · buzz 0.1.2 · dashboard 0.4.1
 
 Two defects, one of which was hiding inside the remedy for the other.
