@@ -30,7 +30,7 @@ import {
 import { readFileSync, mkdirSync, readdirSync, unlinkSync, watch, chmodSync, copyFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { installLifecycle } from './lifecycle.ts'
+import { installLifecycle, recordLifecycle } from './lifecycle.ts'
 
 let PLUGIN_VERSION = '?'
 try {
@@ -70,17 +70,28 @@ const OUTBOX_DIR = process.env.DASHBOARD_OUTBOX ?? '/home/claude/chat-downloads'
 // The box's connectord token authenticates outbound replies to the control
 // plane. Standard location is /etc/5dive/connectord.env (root:claude 640;
 // agent users are in the claude group). Env/.env override for tests.
+//
+// DIVE-3810: this file is REWRITTEN UNDER US while the agent runs — pairing a
+// phone rotates the box token (shelld's /shell/rotate-token does the line
+// surgery). A token read once at module scope therefore outlives the rotation
+// that invalidates it, and from that instant the channel is deaf AND mute: all
+// three calls below carry a dead credential. So `TOKEN` is mutable and gets
+// re-read on rejection. shelld itself already treats it this way
+// (`let TOKEN` + rotate-in-place); this plugin was the reader that did not.
+const TOKEN_FILE = process.env.CONNECTORD_ENV_FILE ?? '/etc/5dive/connectord.env'
 function loadConnectordToken(): string {
+  // An explicit env override stays authoritative and is never reloaded: it is
+  // set by a test or an off-box run, and nothing rotates it.
   if (process.env.CONNECTORD_TOKEN) return process.env.CONNECTORD_TOKEN
   try {
-    for (const line of readFileSync('/etc/5dive/connectord.env', 'utf8').split('\n')) {
+    for (const line of readFileSync(TOKEN_FILE, 'utf8').split('\n')) {
       const m = line.match(/^CONNECTORD_TOKEN=(.+)$/)
       if (m) return m[1].trim()
     }
   } catch {}
   return ''
 }
-const TOKEN = loadConnectordToken()
+let TOKEN = loadConnectordToken()
 if (!TOKEN) {
   process.stderr.write(
     `dashboard channel: connectord token not found\n` +
@@ -95,6 +106,78 @@ const AGENT = (process.env.USER ?? '').replace(/^agent-/, '')
 if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(AGENT)) {
   process.stderr.write(`dashboard channel: cannot derive agent name from USER="${process.env.USER ?? ''}"\n`)
   process.exit(1)
+}
+
+// --- DIVE-3810: the credential is mutable, and its failure has to be visible --
+//
+// Pairing a phone rewrites /etc/5dive/connectord.env while this process runs.
+// Every surface a triager would check then says "healthy" — the process is
+// alive, the MCP socket is ESTAB with empty queues, the control plane's
+// /pending holds the messages with their text intact and delivered_at NULL,
+// and the OTHER channel on the same agent keeps working because buzz does not
+// use this token. The only signal was one stderr line that goes down the stdio
+// socket into the harness and is written to no file on the box.
+//
+// So: reload on rejection (the cheapest correct fix — no watch, no timer, and
+// it costs exactly one extra request on the request that was going to fail
+// anyway), and write the state CHANGE to lifecycle.log, which is a file on the
+// box that a human or an agent can read after the fact.
+let authFailing = false
+
+/** Re-read the token from disk. True only if it actually CHANGED. */
+function reloadToken(): boolean {
+  const next = loadConnectordToken()
+  if (!next || next === TOKEN) return false
+  TOKEN = next
+  return true
+}
+
+function recordAuth(reason: string): void {
+  recordLifecycle(STATE_DIR, 'auth', 'dashboard', reason)
+}
+
+/**
+ * Every control-plane call goes through here so no call site can hold a stale
+ * credential — a fix applied at one of the three would leave the channel half
+ * deaf. `what` names the call in the record.
+ *
+ * On 401/403 the token is re-read; if (and only if) it changed, the request is
+ * retried ONCE with the new one. A rejection that survives a reload is a real
+ * rejection and is returned to the caller unchanged — this must not turn an
+ * auth failure into a retry loop.
+ */
+async function authedFetch(url: string, what: string, init: RequestInit = {}): Promise<Response> {
+  const send = () =>
+    fetch(url, {
+      ...init,
+      headers: { ...((init.headers as Record<string, string>) ?? {}), authorization: `Bearer ${TOKEN}` },
+    })
+  let res = await send()
+  if (res.status !== 401 && res.status !== 403) {
+    if (authFailing) {
+      authFailing = false
+      recordAuth(`credential accepted again on ${what} (${res.status})`)
+    }
+    return res
+  }
+  if (reloadToken()) {
+    // Drain the rejected body so the retry is not racing a live stream.
+    void res.text().catch(() => '')
+    res = await send()
+    if (res.status !== 401 && res.status !== 403) {
+      authFailing = false
+      recordAuth(`token rotated on disk (${TOKEN_FILE}); reloaded and retried ${what} ok`)
+      return res
+    }
+  }
+  if (!authFailing) {
+    authFailing = true
+    recordAuth(
+      `${what} rejected ${res.status} and reloading ${TOKEN_FILE} did not fix it — ` +
+        `dashboard chat is deaf and mute until this clears`,
+    )
+  }
+  return res
 }
 
 const mcp = new Server(
@@ -234,9 +317,10 @@ async function drainPending(): Promise<void> {
 async function drainPendingOnce(): Promise<void> {
   let items: Array<{ id: number; text: string; from?: string; chat_id?: string; ts?: string; image_path?: string }>
   try {
-    const res = await fetch(`${API_BASE}/server/messages/pending?agent=${encodeURIComponent(AGENT)}`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
-    })
+    const res = await authedFetch(
+      `${API_BASE}/server/messages/pending?agent=${encodeURIComponent(AGENT)}`,
+      'pending fetch',
+    )
     if (!res.ok) throw new Error(`${res.status}`)
     items = ((await res.json()) as { pending?: typeof items }).pending ?? []
   } catch (err) {
@@ -270,11 +354,12 @@ async function drainPendingOnce(): Promise<void> {
   }
   if (acked.length === 0) return
   try {
-    await fetch(`${API_BASE}/server/messages/pending/ack`, {
+    const ack = await authedFetch(`${API_BASE}/server/messages/pending/ack`, 'pending ack', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: AGENT, ids: acked }),
     })
+    if (!ack.ok) throw new Error(`${ack.status}`)
     process.stderr.write(`dashboard channel: healed ${acked.length} undelivered message(s)\n`)
   } catch (err) {
     process.stderr.write(`dashboard channel: pending ack failed (will redeliver next boot): ${err}\n`)
@@ -334,11 +419,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     }
   })
 
-  const res = await fetch(`${API_BASE}/server/messages/event`, {
+  const res = await authedFetch(`${API_BASE}/server/messages/event`, 'outbound reply', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      authorization: `Bearer ${TOKEN}`,
     },
     body: JSON.stringify({
       agent: AGENT,
