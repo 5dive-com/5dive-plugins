@@ -104,7 +104,11 @@ export function isBootParentAlive(pid: number): boolean {
 
 // ── the record: a channel start failure must not be encoded as `nothing` ────
 
-export type LifecycleEvent = 'start' | 'exit' | 'crash'
+// DIVE-3810 added 'auth': a channel whose CREDENTIAL died mid-run is neither
+// started, exited nor crashed — the process is healthy and every other
+// surface reads healthy with it — so without an event of its own that state
+// is recorded as `nothing`, which is the failure this file exists to refuse.
+export type LifecycleEvent = 'start' | 'exit' | 'crash' | 'auth'
 
 /**
  * One line, one event, parseable and human-readable.
