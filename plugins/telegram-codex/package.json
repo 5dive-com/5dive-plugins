@@ -26,6 +26,7 @@
     "server.ts",
     "dispatcher.ts",
     "dispatcher-core.ts",
+    "lifecycle.ts",
     "tna.ts",
     "README.md"
   ],

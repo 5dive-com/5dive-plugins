@@ -7,6 +7,7 @@ import {
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { ChannelDispatcher, type DispatchMessage, type DispatchRoute } from './dispatcher-core.ts'
+import { installLifecycle, recordLifecycle } from './lifecycle.ts'
 
 const STATE_DIR = process.env.CODEX_DISPATCHER_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'dispatcher')
@@ -207,6 +208,7 @@ function startAdapter(file: string, extraEnv: Record<string, string>): void {
 let shuttingDown = false
 function fatal(message: string): never {
   process.stderr.write(`codex-dispatcher: ${message}\n`)
+  recordLifecycle(STATE_DIR, 'crash', 'codex-dispatcher', message)
   shutdown(1)
   throw new Error(message)
 }
@@ -218,8 +220,15 @@ function shutdown(code = 0): void {
   }
   setTimeout(() => process.exit(code), 100)
 }
-process.on('SIGTERM', () => shutdown(0))
-process.on('SIGINT', () => shutdown(0))
+
+// The dispatcher owns the channel lifetime in the primary mode. Keep the
+// lifecycle record, stdin-EOF handlers, and real-ppid orphan watchdog on that
+// owner rather than on the adapter children it supervises.
+installLifecycle({
+  channel: 'codex-dispatcher',
+  stateDir: STATE_DIR,
+  cleanup: () => shutdown(0),
+})
 
 await initialize()
 startInbox()

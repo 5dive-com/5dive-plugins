@@ -1,10 +1,14 @@
 import { describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   ChannelDispatcher,
   type DispatchMessage,
   type DispatcherState,
   type RpcPort,
 } from '../plugins/telegram-codex/dispatcher-core.ts'
+import { writeDispatcherInbox } from '../plugins/dashboard/dispatcher-inbox.ts'
 
 const telegram = (id: string, text = id): DispatchMessage => ({
   id,
@@ -140,12 +144,74 @@ describe('Codex app-server channel dispatcher', () => {
     expect(await h.dispatcher.submit(telegram('tg-retry'))).toBe('started')
   })
 
+  test('dashboard adapter reports a synchronous spool failure as a rejection', async () => {
+    let renamed = false
+    const delivery = writeDispatcherInbox('/tmp/inbox.tmp', '/tmp/inbox.json', { text: 'hello' }, {
+      write() { throw new Error('disk full') },
+      rename() { renamed = true },
+    })
+
+    await expect(delivery).rejects.toThrow('disk full')
+    expect(renamed).toBe(false)
+  })
+
+  test('dispatcher-mode boot writes a lifecycle start record', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dive3960-lifecycle-'))
+    const stateDir = join(dir, 'state')
+    const fakeCodex = join(dir, 'fake-codex.ts')
+    writeFileSync(fakeCodex, `#!/usr/bin/env bun
+import { createInterface } from 'node:readline'
+const lines = createInterface({ input: process.stdin })
+lines.on('line', line => {
+  const request = JSON.parse(line)
+  if (request.id == null) return
+  const result = request.method === 'thread/start'
+    ? { thread: { id: 'thread-lifecycle-test' } }
+    : {}
+  process.stdout.write(JSON.stringify({ id: request.id, result }) + '\\n')
+})
+`)
+    chmodSync(fakeCodex, 0o755)
+
+    const child = Bun.spawn(['bun', join(import.meta.dir, '..', 'plugins', 'telegram-codex', 'dispatcher.ts')], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        CODEX_BIN: fakeCodex,
+        CODEX_DISPATCHER_CHANNELS: '',
+        CODEX_DISPATCHER_STATE_DIR: stateDir,
+        CODEX_DISPATCHER_WORKDIR: dir,
+      },
+      stdin: 'pipe',
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+
+    try {
+      const record = join(stateDir, 'lifecycle.log')
+      const deadline = Date.now() + 10_000
+      let body = ''
+      while (Date.now() < deadline) {
+        try { body = readFileSync(record, 'utf8') } catch {}
+        if (body.includes('\tstart\tcodex-dispatcher\t')) break
+        await Bun.sleep(50)
+      }
+      expect(body).toContain('\tstart\tcodex-dispatcher\t')
+      expect(child.exitCode).toBeNull()
+    } finally {
+      child.kill('SIGTERM')
+      await child.exited
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
   test('package entrypoint makes dispatcher primary and retains MCP fallback', async () => {
     const pkg = await Bun.file(new URL('../plugins/telegram-codex/package.json', import.meta.url)).json()
     const entry = await Bun.file(new URL('../plugins/telegram-codex/dispatcher.ts', import.meta.url)).text()
     expect(pkg.scripts.start).toBe('bun dispatcher.ts')
     expect(pkg.scripts['start:mcp-fallback']).toBe('bun server.ts')
     expect(pkg.files).toContain('dispatcher-core.ts')
+    expect(pkg.files).toContain('lifecycle.ts')
     expect(entry).toContain("'-c', 'mcp_servers={}'")
     expect(entry).not.toContain('mcp_servers.telegram.enabled')
   })

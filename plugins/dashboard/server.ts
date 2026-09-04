@@ -27,10 +27,11 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { readFileSync, mkdirSync, readdirSync, unlinkSync, watch, chmodSync, copyFileSync, openSync, closeSync, writeSync, statSync, writeFileSync, renameSync } from 'fs'
+import { readFileSync, mkdirSync, readdirSync, unlinkSync, watch, chmodSync, copyFileSync, openSync, closeSync, writeSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { installLifecycle, recordLifecycle } from './lifecycle.ts'
+import { writeDispatcherInbox } from './dispatcher-inbox.ts'
 
 let PLUGIN_VERSION = '?'
 try {
@@ -232,22 +233,20 @@ const mcp = new Server(
 )
 
 let dispatcherInboxSeq = 0
-function deliverInbound(id: string, text: string, meta: Record<string, unknown>): Promise<void> {
+async function deliverInbound(id: string, text: string, meta: Record<string, unknown>): Promise<void> {
   if (!DISPATCHER_ADAPTER) {
     return mcp.notification({ method: 'notifications/claude/channel', params: { content: text, meta } })
   }
   const seq = `${Date.now()}-${process.pid}-${dispatcherInboxSeq++}`
   const tmp = join(DISPATCHER_INBOX_DIR, `.${seq}.tmp`)
   const dest = join(DISPATCHER_INBOX_DIR, `${seq}.json`)
-  writeFileSync(tmp, JSON.stringify({
+  await writeDispatcherInbox(tmp, dest, {
     id,
     text,
     route: { source: 'dashboard', chat_id: String(meta.chat_id ?? 'dashboard') },
     ...(typeof meta.image_path === 'string' ? { image_path: meta.image_path } : {}),
     received_at: meta.ts,
-  }) + '\n', { mode: 0o600 })
-  renameSync(tmp, dest)
-  return Promise.resolve()
+  })
 }
 
 // --- Inbound: agent-inbox drop-dir -> notifications/claude/channel ---------
