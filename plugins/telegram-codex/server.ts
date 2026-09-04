@@ -571,9 +571,21 @@ function ingestDispatcherOutbox(name: string): void {
   const options = obj.message_thread_id
     ? { message_thread_id: Number(obj.message_thread_id) }
     : undefined
-  void bot.api.sendMessage(String(obj.chat_id), String(obj.text), options).then(() => {
+  const files = Array.isArray(obj.files)
+    ? obj.files.filter((f: unknown): f is string => typeof f === 'string' && f.startsWith('/')).slice(0, 10)
+    : []
+  void (async () => {
+    await bot.api.sendMessage(String(obj.chat_id), String(obj.text), options)
+    for (const file of files) {
+      const input = new InputFile(file)
+      if (PHOTO_EXTS.has(extname(file).toLowerCase())) {
+        await bot.api.sendPhoto(String(obj.chat_id), input, options)
+      } else {
+        await bot.api.sendDocument(String(obj.chat_id), input, options)
+      }
+    }
     try { unlinkSync(full) } catch {}
-  }).catch(err => {
+  })().catch(err => {
     process.stderr.write(`telegram-codex: dispatcher reply failed for ${name}: ${err}\n`)
     setTimeout(() => ingestDispatcherOutbox(name), 1_000).unref?.()
   }).finally(() => dispatcherOutboxBusy.delete(name))

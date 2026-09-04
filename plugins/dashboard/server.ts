@@ -561,7 +561,7 @@ function ingestDispatcherOutbox(name: string): void {
     return
   }
   dispatcherOutboxBusy.add(name)
-  void sendDashboardReply({ chat_id: obj.chat_id, text: obj.text }).then(() => {
+  void sendDashboardReply({ chat_id: obj.chat_id, text: obj.text, files: obj.files }).then(() => {
     try { unlinkSync(full) } catch {}
   }).catch(err => {
     process.stderr.write(`dashboard channel: dispatcher reply failed for ${name}: ${err}\n`)

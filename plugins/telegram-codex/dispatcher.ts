@@ -6,7 +6,9 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { ChannelDispatcher, type DispatchMessage, type DispatchRoute } from './dispatcher-core.ts'
+import {
+  ChannelDispatcher, parseOutboundMessage, type DispatchMessage, type DispatchRoute,
+} from './dispatcher-core.ts'
 import { installLifecycle, recordLifecycle } from './lifecycle.ts'
 
 const STATE_DIR = process.env.CODEX_DISPATCHER_STATE_DIR
@@ -131,11 +133,13 @@ function stateStore() {
 
 let outSeq = 0
 async function publish(route: DispatchRoute, text: string, meta: Record<string, unknown>): Promise<void> {
-  process.stdout.write(`${text}\n`)
+  const outbound = parseOutboundMessage(text)
+  process.stdout.write(`${outbound.text}\n`)
   if (route.source === 'agent') return
+  if (!outbound.text) throw new Error('dispatcher reply has no text after attachment directives')
   const dir = join(OUTBOX_DIR, route.source)
   const file = join(dir, `${Date.now()}-${process.pid}-${outSeq++}.json`)
-  atomicJson(file, { ...route, text, ...meta })
+  atomicJson(file, { ...route, text: outbound.text, ...(outbound.files.length ? { files: outbound.files } : {}), ...meta })
 }
 
 const rpc = new JsonRpcProcess()
@@ -239,6 +243,8 @@ if (CHANNELS.has('dashboard')) {
   startAdapter(join(import.meta.dir, '..', 'dashboard', 'server.ts'), {
     CODEX_DISPATCHER_ADAPTER: 'dashboard',
     DASHBOARD_STATE_DIR: process.env.DASHBOARD_STATE_DIR
-      ?? join(homedir(), '.codex', 'channels', 'dashboard'),
+      // The control plane and shelld use this compatibility path for every
+      // runtime. Reusing it lets a Codex adapter recover drops made offline.
+      ?? join(homedir(), '.claude', 'channels', 'dashboard'),
   })
 }
