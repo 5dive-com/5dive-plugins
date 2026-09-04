@@ -31,6 +31,13 @@ an app-server or adapter failure. Thread sandbox and approval settings are
 inherited from Codex configuration; because this headless dispatcher has no
 approval UI, app-server approval requests are declined rather than escalated.
 
+Dashboard delivery keeps using `~/.claude/channels/dashboard/` as a runtime-
+neutral compatibility path because shelld writes durable inbound drops there.
+To attach a local file in dispatcher mode, Codex emits a non-empty caption plus
+a separate `[[5dive-attachment:/absolute/path]]` line. The directive is removed
+from chat text and up to ten files are sent only on the response's source
+channel.
+
 ## MCP polling fallback
 
 Run `bun run start:mcp-fallback` and wire `server.ts` into Codex only when the

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   ChannelDispatcher,
+  parseOutboundMessage,
   type DispatchMessage,
   type DispatcherState,
   type RpcPort,
@@ -55,6 +56,15 @@ function harness(initial: DispatcherState | null = null) {
 }
 
 describe('Codex app-server channel dispatcher', () => {
+  test('extracts absolute attachment directives without leaking them into chat text', () => {
+    expect(parseOutboundMessage('Report attached.\n[[5dive-attachment:/tmp/report.pdf]]')).toEqual({
+      text: 'Report attached.', files: ['/tmp/report.pdf'],
+    })
+    expect(parseOutboundMessage('keep [[5dive-attachment:relative.txt]] inline')).toEqual({
+      text: 'keep [[5dive-attachment:relative.txt]] inline', files: [],
+    })
+  })
+
   test('idle inbound starts a turn without model-owned polling', async () => {
     const h = harness()
     await h.dispatcher.initialize()

@@ -35,6 +35,18 @@ export interface DispatchSink {
 }
 
 const MAX_SEEN = 512
+const ATTACHMENT_LINE = /^\[\[5dive-attachment:(\/[^\]\r\n]+)\]\]$/
+
+export function parseOutboundMessage(raw: string): { text: string; files: string[] } {
+  const files: string[] = []
+  const lines = raw.split(/\r?\n/).filter(line => {
+    const match = line.trim().match(ATTACHMENT_LINE)
+    if (!match) return true
+    if (files.length < 10 && !files.includes(match[1]!)) files.push(match[1]!)
+    return false
+  })
+  return { text: lines.join('\n').trim(), files }
+}
 
 function routeKey(route: DispatchRoute): string {
   return `${route.source}:${route.chat_id}:${route.message_thread_id ?? ''}`
@@ -88,7 +100,7 @@ export class ChannelDispatcher {
           cwd: this.cwd,
           serviceName: '5dive-channel-dispatcher',
           developerInstructions:
-            'Messages arrive from 5dive channels. Respond normally in assistant messages; the dispatcher routes those messages back to the originating channel. Do not call wait_for_message or channel reply tools.',
+            'Messages arrive from 5dive channels. Respond normally in assistant messages; the dispatcher routes those messages back to the originating channel. Do not call wait_for_message or channel reply tools. To attach a local file, include a separate [[5dive-attachment:/absolute/path]] line after a non-empty caption; the dispatcher removes the directive and sends the file only to the originating channel.',
         })
         const id = started?.thread?.id
         if (typeof id !== 'string' || !id) throw new Error('thread/start returned no thread id')
