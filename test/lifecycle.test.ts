@@ -212,7 +212,7 @@ describe('the channel start is not gated on a network step', () => {
       // deaf seat with no error anyone reads.
       expect(start).not.toContain('&&')
       // …and the server is still actually started.
-      expect(start).toMatch(/bun (start|server)\.ts/)
+      expect(start).toMatch(/bun (start|server|dispatcher)\.ts/)
     })
   }
 

@@ -31,6 +31,7 @@ import { readFileSync, mkdirSync, readdirSync, unlinkSync, watch, chmodSync, cop
 import { homedir } from 'os'
 import { join } from 'path'
 import { installLifecycle, recordLifecycle } from './lifecycle.ts'
+import { writeDispatcherInbox } from './dispatcher-inbox.ts'
 
 let PLUGIN_VERSION = '?'
 try {
@@ -39,6 +40,11 @@ try {
 } catch {}
 
 const STATE_DIR = process.env.DASHBOARD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'dashboard')
+const DISPATCHER_ADAPTER = process.env.CODEX_DISPATCHER_ADAPTER === 'dashboard'
+const DISPATCHER_STATE_DIR = process.env.CODEX_DISPATCHER_STATE_DIR
+  ?? join(homedir(), '.codex', 'channels', 'dispatcher')
+const DISPATCHER_INBOX_DIR = join(DISPATCHER_STATE_DIR, 'inbox')
+const DISPATCHER_OUTBOX_DIR = join(DISPATCHER_STATE_DIR, 'outbox', 'dashboard')
 const ENV_FILE = join(STATE_DIR, '.env')
 const AGENT_INBOX_DIR = join(STATE_DIR, 'agent-inbox')
 // DIVE-3574: the control plane drops a zero-byte marker here (via the box's
@@ -59,6 +65,10 @@ const COLLECT_NOW_DIR = join(STATE_DIR, 'collect-now')
 const DRAIN_LOCK = join(STATE_DIR, 'pending-drain.lock')
 mkdirSync(AGENT_INBOX_DIR, { recursive: true, mode: 0o700 })
 mkdirSync(COLLECT_NOW_DIR, { recursive: true, mode: 0o700 })
+if (DISPATCHER_ADAPTER) {
+  mkdirSync(DISPATCHER_INBOX_DIR, { recursive: true, mode: 0o700 })
+  mkdirSync(DISPATCHER_OUTBOX_DIR, { recursive: true, mode: 0o700 })
+}
 
 // Load ~/.claude/channels/dashboard/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — overrides live here
@@ -222,6 +232,23 @@ const mcp = new Server(
   },
 )
 
+let dispatcherInboxSeq = 0
+async function deliverInbound(id: string, text: string, meta: Record<string, unknown>): Promise<void> {
+  if (!DISPATCHER_ADAPTER) {
+    return mcp.notification({ method: 'notifications/claude/channel', params: { content: text, meta } })
+  }
+  const seq = `${Date.now()}-${process.pid}-${dispatcherInboxSeq++}`
+  const tmp = join(DISPATCHER_INBOX_DIR, `.${seq}.tmp`)
+  const dest = join(DISPATCHER_INBOX_DIR, `${seq}.json`)
+  await writeDispatcherInbox(tmp, dest, {
+    id,
+    text,
+    route: { source: 'dashboard', chat_id: String(meta.chat_id ?? 'dashboard') },
+    ...(typeof meta.image_path === 'string' ? { image_path: meta.image_path } : {}),
+    received_at: meta.ts,
+  })
+}
+
 // --- Inbound: agent-inbox drop-dir -> notifications/claude/channel ---------
 //
 // Drop-file contract (one JSON object per file, name ending in `.json`):
@@ -249,11 +276,7 @@ function ingestInboxFile(name: string): void {
     process.stderr.write(`dashboard channel: agent-inbox file ${name} has no text\n`); return
   }
   const from = typeof obj?.from === 'string' && obj.from ? obj.from : 'dashboard'
-  void mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content: text,
-      meta: {
+  void deliverInbound(`dashboard:drop:${name}`, text, {
         chat_id: typeof obj?.chat_id === 'string' && obj.chat_id ? obj.chat_id : 'dashboard',
         message_id: '0',
         user: from,
@@ -261,8 +284,6 @@ function ingestInboxFile(name: string): void {
         ts: typeof obj?.ts === 'string' && obj.ts ? obj.ts : new Date().toISOString(),
         ...(typeof obj?.image_path === 'string' && obj.image_path.startsWith('/')
           ? { image_path: obj.image_path } : {}),
-      },
-    },
   }).catch(err => {
     process.stderr.write(`dashboard channel: failed to deliver inbound to Claude: ${err}\n`)
   })
@@ -414,11 +435,7 @@ async function drainPendingOnce(): Promise<void> {
   for (const m of items) {
     if (typeof m?.text !== 'string' || !m.text.trim()) { acked.push(m.id); continue }
     try {
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content: m.text,
-          meta: {
+      await deliverInbound(`dashboard:pending:${m.id}`, m.text, {
             chat_id: typeof m.chat_id === 'string' && m.chat_id ? m.chat_id : 'dashboard',
             message_id: '0',
             user: m.from ?? 'dashboard',
@@ -426,8 +443,6 @@ async function drainPendingOnce(): Promise<void> {
             ts: m.ts ?? new Date().toISOString(),
             ...(typeof m.image_path === 'string' && m.image_path.startsWith('/')
               ? { image_path: m.image_path } : {}),
-          },
-        },
       })
       acked.push(m.id)
     } catch (err) {
@@ -482,9 +497,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }))
 
-mcp.setRequestHandler(CallToolRequestSchema, async req => {
-  if (req.params.name !== 'reply') throw new Error(`unknown tool: ${req.params.name}`)
-  const args = (req.params.arguments ?? {}) as { chat_id?: unknown; text?: unknown; files?: unknown }
+async function sendDashboardReply(args: { chat_id?: unknown; text?: unknown; files?: unknown }): Promise<string> {
   const text = typeof args.text === 'string' ? args.text : ''
   if (!text.trim()) throw new Error('text is required')
   const chatId = typeof args.chat_id === 'string' && args.chat_id ? args.chat_id : 'dashboard'
@@ -525,16 +538,62 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     throw new Error(`dashboard reply failed: control plane returned ${res.status} ${detail.slice(0, 200)}`)
   }
   const j = (await res.json().catch(() => null)) as { id?: number } | null
-  return { content: [{ type: 'text', text: `sent (id: ${j?.id ?? '?'})` }] }
+  return `sent (id: ${j?.id ?? '?'})`
+}
+
+mcp.setRequestHandler(CallToolRequestSchema, async req => {
+  if (req.params.name !== 'reply') throw new Error(`unknown tool: ${req.params.name}`)
+  const result = await sendDashboardReply(
+    (req.params.arguments ?? {}) as { chat_id?: unknown; text?: unknown; files?: unknown },
+  )
+  return { content: [{ type: 'text', text: result }] }
 })
+
+const dispatcherOutboxBusy = new Set<string>()
+function ingestDispatcherOutbox(name: string): void {
+  if (!name.endsWith('.json') || dispatcherOutboxBusy.has(name)) return
+  const full = join(DISPATCHER_OUTBOX_DIR, name)
+  let obj: any
+  try { obj = JSON.parse(readFileSync(full, 'utf8')) } catch { return }
+  if (obj?.source !== 'dashboard' || !String(obj?.text ?? '').trim()) {
+    process.stderr.write(`dashboard channel: invalid dispatcher outbox file ${name}\n`)
+    try { unlinkSync(full) } catch {}
+    return
+  }
+  dispatcherOutboxBusy.add(name)
+  void sendDashboardReply({ chat_id: obj.chat_id, text: obj.text }).then(() => {
+    try { unlinkSync(full) } catch {}
+  }).catch(err => {
+    process.stderr.write(`dashboard channel: dispatcher reply failed for ${name}: ${err}\n`)
+    setTimeout(() => ingestDispatcherOutbox(name), 1_000).unref?.()
+  }).finally(() => dispatcherOutboxBusy.delete(name))
+}
+
+function startDispatcherOutbox(): void {
+  const drain = () => {
+    try { for (const name of readdirSync(DISPATCHER_OUTBOX_DIR)) ingestDispatcherOutbox(name) } catch {}
+  }
+  drain()
+  try {
+    watch(DISPATCHER_OUTBOX_DIR, (_event, name) => { if (name) ingestDispatcherOutbox(String(name)) })
+    process.stderr.write(`dashboard channel: dispatcher adapter watching ${DISPATCHER_OUTBOX_DIR}\n`)
+  } catch (err) {
+    process.stderr.write(`dashboard channel: dispatcher outbox watch failed: ${err}\n`)
+  }
+  setInterval(drain, 15_000).unref?.()
+}
 
 // DIVE-3752: same gap as buzz — this server ends in long-lived timers with no
 // signal handler, no stdin handler and no exit path, so a severed parent chain
 // leaves it running. The interval below is `.unref()`d, which does NOT save it:
 // the MCP stdio transport holds stdin open and keeps the loop alive.
-installLifecycle({ channel: 'dashboard', stateDir: STATE_DIR })
-
-await mcp.connect(new StdioServerTransport())
+if (!DISPATCHER_ADAPTER) {
+  installLifecycle({ channel: 'dashboard', stateDir: STATE_DIR })
+  await mcp.connect(new StdioServerTransport())
+} else {
+  process.stderr.write('dashboard channel: app-server dispatcher adapter active; native MCP delivery is not running\n')
+  startDispatcherOutbox()
+}
 // Claude Code registers channel-notification handling shortly AFTER the MCP
 // connection comes up ("Channel notifications registered", ~20-50ms later) —
 // a notification pushed inside that window is silently dropped (observed
@@ -546,5 +605,5 @@ setTimeout(() => {
   startAgentInbox()
   startCollectNowWatch()
   void drainPending()
-}, 5_000)
+}, DISPATCHER_ADAPTER ? 0 : 5_000)
 setInterval(() => void drainPending(), 5 * 60_000).unref()

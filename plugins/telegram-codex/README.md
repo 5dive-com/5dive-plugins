@@ -1,16 +1,40 @@
-# telegram-codex MCP
+# telegram-codex
 
-A Telegram bridge for [OpenAI Codex CLI](https://github.com/openai/codex),
-delivered as a stdio MCP server.
+A Telegram and dashboard bridge for [OpenAI Codex CLI](https://github.com/openai/codex).
+Its primary entrypoint owns a persistent local `codex app-server` process, so
+inbound messages start or steer turns without asking the model to poll.
 
-Sibling to the [`telegram/`](../telegram/) plugin (which targets Claude
-Code). Forked rather than shared because the runtime contracts diverge —
-Codex has no channel-notification protocol, so inbound delivery here is
-poll-based via a `wait_for_message` tool instead of pushed via channels.
+The original stdio MCP bridge remains available as a compatibility fallback.
 
-## What you get
+## Primary dispatcher
 
-Five MCP tools available to Codex:
+Run `bun start` (or the installed `telegram-codex-dispatcher` binary). The
+dispatcher uses Codex app-server's supported local stdio transport, persists
+its thread and delivery ids under `~/.codex/channels/dispatcher/`, and launches
+the selected channel adapters. Telegram is enabled by default; enable both with:
+
+```sh
+CODEX_DISPATCHER_CHANNELS=telegram,dashboard bun start
+```
+
+Inbound behavior is source-safe: a message starts `turn/start` while idle,
+same-conversation messages use `turn/steer`, and another source waits for the
+active turn to finish. Agent-message events are written to the matching
+channel outbox, so a Telegram turn cannot reply into dashboard chat.
+
+The state file survives process restarts. A delivery id is handled once; an
+inbox file is removed only after app-server accepts it. If dispatch fails, the
+file remains and is retried. If the process restarts during a turn, the source
+gets an explicit interrupted-turn notice and queued messages continue after the
+thread resumes. Supervisors should restart the dispatcher when it exits after
+an app-server or adapter failure. Thread sandbox and approval settings are
+inherited from Codex configuration; because this headless dispatcher has no
+approval UI, app-server approval requests are declined rather than escalated.
+
+## MCP polling fallback
+
+Run `bun run start:mcp-fallback` and wire `server.ts` into Codex only when the
+dispatcher cannot be used. This legacy path exposes five MCP tools:
 
 - `wait_for_message` — block until the user sends a DM/group message.
 - `reply` — send a new Telegram message (text, MarkdownV2, file attachments).
@@ -87,7 +111,7 @@ Messages from anyone not on the lists are silently dropped before they
 reach `wait_for_message`. Group access can only be configured by
 hand-writing access.json — the `pair.ts` CLI handles DMs only.
 
-**4. Wire into Codex**
+**4. Optional: wire the polling fallback into Codex**
 
 Add to `~/.codex/config.toml`:
 
@@ -173,20 +197,20 @@ silence pings entirely with `CODEX_NOTIFY_DISABLED=1` (useful when
 you're already talking to the bot via `wait_for_message`/`reply` and
 the Stop ping would be duplicate).
 
-**7. Run Codex**
+**7. Run the dispatcher**
 
 ```sh
-codex
+bun start
 ```
 
-DM your bot. Codex calls `wait_for_message`, your DM resolves it, Codex
-replies via the `reply` tool. Done.
+DM your bot. The channel adapter submits the message directly to app-server and
+routes streamed agent messages back. No model-owned listen loop is involved.
 
 ## Differences from the Claude Code build
 
 | Concern               | `telegram/` (Claude Code)              | `telegram-codex/` (this)         |
 | --------------------- | -------------------------------------- | -------------------------------- |
-| Inbound delivery      | `claude/channel` JSON-RPC notification | `wait_for_message` blocking tool |
+| Inbound delivery      | `claude/channel` JSON-RPC notification | app-server `turn/start` / `turn/steer` (MCP polling fallback retained) |
 | Permission relay      | `claude/channel/permission` protocol   | `PermissionRequest` hook + buttons |
 | Slash commands        | `/telegram:configure`, `:access`, …    | bot-side menu (`/help` `/status` `/stop` `/restart` `/agents` `/tasks` `/task` `/org` `/model` `/ping` `/start`) |
 | Lifecycle hooks       | PreToolUse, Stop, etc.                 | `Stop` hook ships in `hooks/`    |
