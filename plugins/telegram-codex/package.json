@@ -19,15 +19,19 @@
     "bridge"
   ],
   "bin": {
-    "telegram-codex-mcp": "./server.ts"
+    "telegram-codex-mcp": "./server.ts",
+    "telegram-codex-dispatcher": "./dispatcher.ts"
   },
   "files": [
     "server.ts",
+    "dispatcher.ts",
+    "dispatcher-core.ts",
     "tna.ts",
     "README.md"
   ],
   "scripts": {
-    "start": "bun server.ts"
+    "start": "bun dispatcher.ts",
+    "start:mcp-fallback": "bun server.ts"
   },
   "publishConfig": {
     "access": "public"

@@ -47,6 +47,11 @@ const PLUGIN_VERSION = (() => {
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(homedir(), '.codex', 'channels', 'telegram')
+const DISPATCHER_ADAPTER = process.env.CODEX_DISPATCHER_ADAPTER === 'telegram'
+const DISPATCHER_STATE_DIR = process.env.CODEX_DISPATCHER_STATE_DIR
+  ?? join(homedir(), '.codex', 'channels', 'dispatcher')
+const DISPATCHER_INBOX_DIR = join(DISPATCHER_STATE_DIR, 'inbox')
+const DISPATCHER_OUTBOX_DIR = join(DISPATCHER_STATE_DIR, 'outbox', 'telegram')
 
 // DIVE-2846: a tap that fails must leave a record that outlives the process.
 // stderr is captured by the harness that spawns us (measured: "Server stderr:
@@ -103,6 +108,10 @@ const LAST_INBOUND_FILE = join(STATE_DIR, 'last-inbound.stamp')
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
 mkdirSync(PERMS_DIR, { recursive: true, mode: 0o700 })
+if (DISPATCHER_ADAPTER) {
+  mkdirSync(DISPATCHER_INBOX_DIR, { recursive: true, mode: 0o700 })
+  mkdirSync(DISPATCHER_OUTBOX_DIR, { recursive: true, mode: 0o700 })
+}
 
 // Lock the token to owner-only, then load it. Real env wins so callers
 // running the server with TELEGRAM_BOT_TOKEN=... in their shell override.
@@ -387,6 +396,8 @@ type InboundMsg = {
   ts: string
   image_path?: string
   attachment?: AttachmentMeta
+  dispatch_id?: string
+  dispatch_source?: 'telegram' | 'agent'
 }
 
 const inboxQueue: InboundMsg[] = []
@@ -394,6 +405,26 @@ type Waiter = { resolve: (m: InboundMsg) => void; timer: ReturnType<typeof setTi
 const waiters: Waiter[] = []
 
 function enqueueInbound(msg: InboundMsg) {
+  if (DISPATCHER_ADAPTER) {
+    const id = msg.dispatch_id
+      ?? `telegram:${msg.chat_id}:${msg.message_thread_id ?? ''}:${msg.message_id}`
+    const seq = `${Date.now()}-${process.pid}-${dispatcherInboxSeq++}`
+    const tmp = join(DISPATCHER_INBOX_DIR, `.${seq}.tmp`)
+    const dest = join(DISPATCHER_INBOX_DIR, `${seq}.json`)
+    writeFileSync(tmp, JSON.stringify({
+      id,
+      text: msg.text,
+      route: {
+        source: msg.dispatch_source ?? 'telegram',
+        chat_id: msg.chat_id,
+        ...(msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {}),
+      },
+      ...(msg.image_path ? { image_path: msg.image_path } : {}),
+      received_at: msg.ts,
+    }) + '\n', { mode: 0o600 })
+    renameSync(tmp, dest)
+    return
+  }
   // While the agent is in a detected stall (quota/auth/wedge) it can't run a
   // model turn to answer, so a queued message would just sit there silently —
   // the user can't tell if it's still stuck. Instead, reply to EACH inbound
@@ -418,6 +449,8 @@ function enqueueInbound(msg: InboundMsg) {
     kickOnEnqueue()
   }
 }
+
+let dispatcherInboxSeq = 0
 
 // A message queued with no waiter parked means the agent is out of its listen
 // loop. Without this, delivery waits for the re-arm watchdog to see
@@ -517,8 +550,47 @@ function ingestInboxFile(name: string): void {
     user_id: from,
     text,
     ts: typeof obj?.ts === 'string' && obj.ts ? obj.ts : new Date().toISOString(),
+    dispatch_id: `agent:${name}`,
+    dispatch_source: 'agent',
   })
   process.stderr.write(`telegram-codex: agent-inbox delivered ${name} (from ${from})\n`)
+}
+
+const dispatcherOutboxBusy = new Set<string>()
+function ingestDispatcherOutbox(name: string): void {
+  if (!name.endsWith('.json') || dispatcherOutboxBusy.has(name)) return
+  const full = join(DISPATCHER_OUTBOX_DIR, name)
+  let obj: any
+  try { obj = JSON.parse(readFileSync(full, 'utf8')) } catch { return }
+  if (obj?.source !== 'telegram' || !obj?.chat_id || !String(obj?.text ?? '').trim()) {
+    process.stderr.write(`telegram-codex: invalid dispatcher outbox file ${name}\n`)
+    try { unlinkSync(full) } catch {}
+    return
+  }
+  dispatcherOutboxBusy.add(name)
+  const options = obj.message_thread_id
+    ? { message_thread_id: Number(obj.message_thread_id) }
+    : undefined
+  void bot.api.sendMessage(String(obj.chat_id), String(obj.text), options).then(() => {
+    try { unlinkSync(full) } catch {}
+  }).catch(err => {
+    process.stderr.write(`telegram-codex: dispatcher reply failed for ${name}: ${err}\n`)
+    setTimeout(() => ingestDispatcherOutbox(name), 1_000).unref?.()
+  }).finally(() => dispatcherOutboxBusy.delete(name))
+}
+
+function startDispatcherOutbox(): void {
+  const drain = () => {
+    try { for (const name of readdirSync(DISPATCHER_OUTBOX_DIR)) ingestDispatcherOutbox(name) } catch {}
+  }
+  drain()
+  try {
+    watch(DISPATCHER_OUTBOX_DIR, (_event, name) => { if (name) ingestDispatcherOutbox(String(name)) })
+    process.stderr.write(`telegram-codex: dispatcher adapter watching ${DISPATCHER_OUTBOX_DIR}\n`)
+  } catch (err) {
+    process.stderr.write(`telegram-codex: dispatcher outbox watch failed: ${err}\n`)
+  }
+  setInterval(drain, 15_000).unref?.()
 }
 
 // Drain any files dropped while the server was down, then watch for new ones.
@@ -2825,7 +2897,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 // session is still caught (just slower) and backstopped by sendStallAlert.
 // Tunable up to 600s for agents that reason even longer.
 // ============================================================================
-const REARM_DISABLED = process.env.TELEGRAM_REARM_DISABLED === '1'
+const REARM_DISABLED = DISPATCHER_ADAPTER || process.env.TELEGRAM_REARM_DISABLED === '1'
 const REARM_IDLE_MS = Math.max(20_000, Math.min(600_000,
   Number(process.env.TELEGRAM_REARM_IDLE_MS ?? 180_000)))
 const REARM_CHECK_MS = 15_000
@@ -3199,7 +3271,9 @@ process.on('SIGINT',  shutdown)
 // (`claude` → `bun run` → us) is severed, neither fires reliably — but POSIX
 // reparents us, so the ppid clause in ./lifecycle.ts catches it. No fork had
 // that clause; only `plugins/telegram` did.
-installLifecycle({ channel: 'telegram-codex', stateDir: STATE_DIR, cleanup: shutdown })
+if (!DISPATCHER_ADAPTER) {
+  installLifecycle({ channel: 'telegram-codex', stateDir: STATE_DIR, cleanup: shutdown })
+}
 
 // DIVE-1251: exit when our MCP parent (the codex/TUI session) disconnects. On
 // /clear, codex RE-INITS its MCP servers — it disconnects this server.ts and
@@ -3218,13 +3292,17 @@ const onParentDisconnect = () => {
   process.stderr.write('telegram-codex: MCP parent disconnected (stdin EOF) — exiting orphaned bridge\n')
   shutdown()
 }
-process.stdin.once('end', onParentDisconnect)
-process.stdin.once('close', onParentDisconnect)
-
-await mcp.connect(new StdioServerTransport())
+if (!DISPATCHER_ADAPTER) {
+  process.stdin.once('end', onParentDisconnect)
+  process.stdin.once('close', onParentDisconnect)
+  await mcp.connect(new StdioServerTransport())
+  startRearmWatchdog()
+} else {
+  process.stderr.write('telegram-codex: app-server dispatcher adapter active; MCP polling fallback is not running\n')
+  startDispatcherOutbox()
+}
 
 startPermissionBridge()
-startRearmWatchdog()
 startAgentInbox()
 
 // DIVE-1503/1558 pinned-banner store I/O. Heuristic state: a lost read/write only
