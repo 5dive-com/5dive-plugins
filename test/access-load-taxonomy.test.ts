@@ -1,5 +1,5 @@
 // DIVE-3962 (P03 channel broker, stage 1): compatibility test for the access-file
-// load taxonomy shared by the Claude baseline and the codex/grok/agy forks.
+// load taxonomy shared by the Claude baseline and its five runtime forks.
 //
 // Why it is written against access-core and not the servers: the servers long-poll
 // Telegram on import, so importing them is unsafe (same constraint parity.test.ts
@@ -143,5 +143,26 @@ describe('divergences that must NOT converge', () => {
     for (const c of CHANNELS.slice(1)) {
       expect(readFileSync(join(PLUGINS, c, 'server.ts'), 'utf8')).toContain("'allowlist' | 'static' | 'pairing'")
     }
+  })
+})
+
+// The fence prescribed by community/wiki/a-forked-contract-drifts-where-the-parity-test-does-not-reach.md:
+// that entry's whole finding is that `tna.ts` carried a comment naming FOUR forks while SEVEN
+// existed, so the two enrolled last (opencode, pi) drifted for months inside the very mechanism
+// meant to stop drift. A hand-written fork list decays every time someone adds a sibling.
+//
+// CHANNELS above is a hand-written list, so it is due to decay the same way — and it nearly did
+// here: this row was scoped at three forks and the read found five. `plugins/telegram-qwen` is
+// already sitting untracked in the shared checkout. Deriving the set from the filesystem and
+// asserting the enrolled set EQUALS it means the next fork reds this suite until it is enrolled,
+// rather than silently inheriting the deny-all the whole change exists to remove.
+describe('the fork census is derived, not transcribed', () => {
+  test('every telegram* plugin dir is enrolled in CHANNELS', () => {
+    const onDisk = readdirSync(PLUGINS, { withFileTypes: true })
+      .filter(e => e.isDirectory() && e.name.startsWith('telegram'))
+      .map(e => e.name)
+      .sort()
+    expect(onDisk.length).toBeGreaterThan(0) // a glob that matches nothing passes vacuously
+    expect(onDisk).toEqual([...CHANNELS].sort())
   })
 })
