@@ -53,6 +53,30 @@ const DISPATCHER_STATE_DIR = process.env.CODEX_DISPATCHER_STATE_DIR
 const DISPATCHER_INBOX_DIR = join(DISPATCHER_STATE_DIR, 'inbox')
 const DISPATCHER_OUTBOX_DIR = join(DISPATCHER_STATE_DIR, 'outbox', 'telegram')
 
+// DIVE-4077: THE TMUX PANE IS NOT ALWAYS THE MODEL, and every liveness trick in
+// this file assumed it was. On a codex seat with a channel, 5dive-agent-start
+// hands the pane to the telegram dispatcher and runs the model behind an
+// app-server (#770 / DIVE-4036). The re-arm keystrokes then land in the
+// DISPATCHER's stdin and are discarded, so the kick can never be observed to
+// land; three unobservable kicks escalate to "wedged"; and the stall classifier
+// scrapes that same pane, where no failure banner can ever match, so it reports
+// "cause unknown" and prints the dispatcher's own boot log to the owner. All of
+// it against a perfectly healthy agent that was merely busy.
+//
+// The mode is READ, never re-derived — re-deriving a seat's shape in a second
+// place is the defect DIVE-4036 was filed for. 5dive-agent-start writes the
+// answer to ~/.5dive/delivery.env on every boot and we run as that agent, so
+// this is its own home. Absence means an older box whose launcher predates the
+// declaration; there the pane IS the CLI, which is the historical behaviour.
+const PANE_IS_THE_MODEL = (() => {
+  if (DISPATCHER_ADAPTER) return false
+  if (process.env.CODEX_DISPATCHER_CHANNELS) return false
+  try {
+    const decl = readFileSync(join(homedir(), '.5dive', 'delivery.env'), 'utf8')
+    return !/^AGENT_DELIVERY=dispatcher-inbox\s*$/m.test(decl)
+  } catch { return true }
+})()
+
 // DIVE-2846: a tap that fails must leave a record that outlives the process.
 // stderr is captured by the harness that spawns us (measured: "Server stderr:
 // telegram channel: …" rows in Claude Code's MCP log), but that log is per
@@ -108,7 +132,9 @@ const LAST_INBOUND_FILE = join(STATE_DIR, 'last-inbound.stamp')
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
 mkdirSync(PERMS_DIR, { recursive: true, mode: 0o700 })
-if (DISPATCHER_ADAPTER) {
+if (!PANE_IS_THE_MODEL) {
+  // DIVE-4077: the bridge that owns the bot is not the adapter instance, so the
+  // inbox it writes into must exist for it too.
   mkdirSync(DISPATCHER_INBOX_DIR, { recursive: true, mode: 0o700 })
   mkdirSync(DISPATCHER_OUTBOX_DIR, { recursive: true, mode: 0o700 })
 }
@@ -405,7 +431,17 @@ type Waiter = { resolve: (m: InboundMsg) => void; timer: ReturnType<typeof setTi
 const waiters: Waiter[] = []
 
 function enqueueInbound(msg: InboundMsg) {
-  if (DISPATCHER_ADAPTER) {
+  // DIVE-4077: route on the SEAT's shape, not on how THIS process was spawned.
+  // DISPATCHER_ADAPTER is set only on the instance dispatcher.ts spawns, but the
+  // instance that actually owns the Telegram token is the MCP bridge the codex
+  // app-server starts — which has none of those env vars. So on a dispatcher
+  // seat the inbound took the pane path instead: it was parked for a
+  // wait_for_message that a dispatcher-driven agent never calls, and then the
+  // re-arm that was supposed to rescue it typed into the dispatcher. The message
+  // was never delivered and nothing reported that. PANE_IS_THE_MODEL is false
+  // whenever DISPATCHER_ADAPTER is true, so this strictly widens the seam
+  // DIVE-4036 built to the process that actually needs it.
+  if (!PANE_IS_THE_MODEL) {
     const id = msg.dispatch_id
       ?? `telegram:${msg.chat_id}:${msg.message_thread_id ?? ''}:${msg.message_id}`
     const seq = `${Date.now()}-${process.pid}-${dispatcherInboxSeq++}`
@@ -2945,9 +2981,22 @@ const STALL_ESCALATE_AFTER = Math.max(1, Math.min(20,
   Number(process.env.TELEGRAM_STALL_ESCALATE_AFTER ?? 3)))
 const LAST_STALL_ALERT_FILE = join(STATE_DIR, 'last-stall-alert.stamp')
 // One alert per stall episode. Set when we alert, cleared when the loop
-// recovers (a waiter re-parks). Persisted to a stamp so a server bounce
-// mid-stall doesn't re-ping.
-let stallAlerted = existsSync(LAST_STALL_ALERT_FILE)
+// recovers (a waiter re-parks).
+//
+// DIVE-4077: THIS FLAG GATES DELIVERY, so it must never be inherited from disk.
+// It used to initialize from the stamp, and that made a stall PERMANENT. While
+// it is set, every inbound is answered with the canned refusal and is NOT
+// queued; the empty queue makes the re-arm watchdog return at its
+// `inboxQueue.length === 0` guard before it can reach clearStallAlert(); and the
+// stamp then reloaded the flag on the next boot. So a restart — the owner's last
+// recourse — put a healthy agent straight back into refusing every message, with
+// /status still answering green. A new process has observed nothing, so it now
+// starts out believing nothing.
+let stallAlerted = false
+// Ping dedup ACROSS a bounce, which is all the stamp was ever for: a server
+// restarted mid-stall must not re-ping the owner. Deliberately separate from the
+// delivery gate above, so dedup can survive a restart while the refusal cannot.
+let stallPinged = existsSync(LAST_STALL_ALERT_FILE)
 // The pane as it looked when we alerted. Written next to the stamp so the NEXT
 // occurrence is diagnosable from the box itself instead of from a forwarded
 // screenshot (DIVE-3786: the customer report we had was a photo of a chat).
@@ -2965,6 +3014,17 @@ function capitalize(s: string): string { return s.charAt(0).toUpperCase() + s.sl
 // to read/classify falls back to a generic "wedged" message.
 function detectStallCause(): { cause: string; detail: string } {
   const name = agentName()
+  // DIVE-4077: a capture here would classify the DISPATCHER. It can only fall
+  // through to the unmatched branch and hand the owner that process's own log
+  // as "last lines on its screen" — a diagnosis of the wrong program. Say what
+  // is actually true instead. Unreachable while the watchdog above is the only
+  // caller that escalates, and kept as the second line of defence.
+  if (!PANE_IS_THE_MODEL) {
+    return {
+      cause: 'not responding — its screen is not readable from here',
+      detail: `${name} runs behind the app-server dispatcher, so the tmux pane belongs to the dispatcher rather than to the model`,
+    }
+  }
   try {
     const cp = require('child_process')
     const pane: string = cp.execFileSync('tmux',
@@ -3024,7 +3084,7 @@ function detectStallCauseCached(): { cause: string; detail: string } {
 // Send one stall alert to every owner (allowFrom) DM. Plain text — no markdown,
 // so a banner containing special characters can't break the message.
 function sendStallAlert(): void {
-  if (stallAlerted) return
+  if (stallAlerted || stallPinged) return
   const name = agentName()
   const { cause, detail } = detectStallCause()
   const text = `⚠️ ${name} stopped responding — ${cause}.\n${detail}.\n\n`
@@ -3039,6 +3099,7 @@ function sendStallAlert(): void {
       process.stderr.write(`telegram-codex: stall alert to ${id} failed: ${err?.message}\n`))
   }
   stallAlerted = true
+  stallPinged = true
   try { writeFileSync(LAST_STALL_ALERT_FILE, String(Date.now())) } catch {}
   // Keep the evidence on the box. Without this the only record of what the
   // agent was sitting on is whatever the owner happens to screenshot.
@@ -3052,8 +3113,9 @@ function sendStallAlert(): void {
 // Loop recovered — drop the dedup flag so a future stall alerts again.
 function clearStallAlert(): void {
   rearmSubmitFailed = false
-  if (!stallAlerted) return
+  if (!stallAlerted && !stallPinged) return
   stallAlerted = false
+  stallPinged = false
   try { if (existsSync(LAST_STALL_ALERT_FILE)) unlinkSync(LAST_STALL_ALERT_FILE) } catch {}
 }
 
@@ -3112,9 +3174,18 @@ async function kickListenLoopOnce(name: string): Promise<boolean> {
   return after !== typed
 }
 
+let _panePathWarned = false
 function kickListenLoop(): void {
   const name = agentName()
   if (name === 'unknown') return
+  // DIVE-4077: nothing to re-arm, and typing would go to the dispatcher.
+  if (!PANE_IS_THE_MODEL) {
+    if (!_panePathWarned) {
+      _panePathWarned = true
+      process.stderr.write('telegram-codex: dispatcher seat — pane re-arm skipped (the pane is not the model)\n')
+    }
+    return
+  }
   void (async () => {
     if (await kickListenLoopOnce(name)) { rearmSubmitFailed = false; return }
     // A busy TUI can swallow one Enter; a wedged one swallows every Enter.
@@ -3203,6 +3274,14 @@ function turnInFlight(): boolean {
 function startRearmWatchdog(): void {
   if (REARM_DISABLED) return
   if (agentName() === 'unknown') return
+  // DIVE-4077: on a dispatcher seat there is no listen loop to re-arm — the
+  // dispatcher submits turns to the app-server. Running this watchdog there can
+  // only ever accumulate unobservable kicks and escalate a busy agent to
+  // "wedged", which is exactly the outage it is named for preventing.
+  if (!PANE_IS_THE_MODEL) {
+    process.stderr.write('telegram-codex: dispatcher seat — re-arm watchdog not started (the pane is not the model)\n')
+    return
+  }
   const timer = setInterval(() => {
     // Parked in wait_for_message → loop is armed and healthy.
     if (waiters.length > 0) { rearmKicks = 0; clearStallAlert(); return }
