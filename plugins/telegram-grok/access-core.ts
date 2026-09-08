@@ -6,7 +6,7 @@
 //
 // It owns exactly one decision: what a FAILED read of access.json means. That
 // decision is security-critical and it had drifted. The Claude baseline splits
-// three ways; every fork (codex/grok/agy) collapsed all three into a single
+// three ways; every runtime fork collapsed all three into a single
 // `catch { return DEFAULT_ACCESS }`, and DEFAULT_ACCESS has an EMPTY allowFrom
 // — i.e. on a momentarily unreadable file the forks silently DENY EVERY CHAT.
 // That is the exact failure DIVE-159 hardened the baseline against (a `sudo`

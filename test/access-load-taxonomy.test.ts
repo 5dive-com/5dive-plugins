@@ -22,10 +22,12 @@ import { readAccessFile as baseline } from '../plugins/telegram/access-core.ts'
 import { readAccessFile as codex } from '../plugins/telegram-codex/access-core.ts'
 import { readAccessFile as grok } from '../plugins/telegram-grok/access-core.ts'
 import { readAccessFile as agy } from '../plugins/telegram-agy/access-core.ts'
+import { readAccessFile as opencode } from '../plugins/telegram-opencode/access-core.ts'
+import { readAccessFile as pi } from '../plugins/telegram-pi/access-core.ts'
 
 const PLUGINS = join(import.meta.dir, '..', 'plugins')
-const CHANNELS = ['telegram', 'telegram-codex', 'telegram-grok', 'telegram-agy'] as const
-const LOADERS = { telegram: baseline, 'telegram-codex': codex, 'telegram-grok': grok, 'telegram-agy': agy }
+const CHANNELS = ['telegram', 'telegram-codex', 'telegram-grok', 'telegram-agy', 'telegram-opencode', 'telegram-pi'] as const
+const LOADERS = { telegram: baseline, 'telegram-codex': codex, 'telegram-grok': grok, 'telegram-agy': agy, 'telegram-opencode': opencode, 'telegram-pi': pi }
 
 // A stand-in for each plugin's own Access shape. The taxonomy is generic over it;
 // what matters is being able to tell "the file was honoured" from "we fell back".

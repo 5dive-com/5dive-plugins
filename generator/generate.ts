@@ -49,6 +49,7 @@ const BASE_DIR = join(PLUGINS, BASE)
 const COPY_FILES = [
   'server.ts',
   'tna.ts',
+  'access-core.ts', // DIVE-3962: runtime-neutral access-file load taxonomy — no tokens, copied byte-exact
   'banner.ts', // DIVE-1558: pure banner decision module — no tokens, copied byte-exact
   'lifecycle.ts', // DIVE-3752: orphan watchdog + start/exit record — copied byte-exact
   'pair.ts',
