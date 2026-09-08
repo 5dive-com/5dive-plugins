@@ -38,6 +38,16 @@ const normalize = (raw: unknown): Fixture => ({
   from: 'file',
 })
 
+// Both chmod-driven arms below are meaningless under a root runner: root bypasses
+// DAC, so a 0o000 file reads fine and the loader correctly does NOT throw. Measured,
+// not assumed — `sudo bun test` on this file reds 12 of 41 without this guard, two
+// arms x six channels. That red is not a defect, and a red that is not a defect is
+// how an assertion gets "fixed" by being weakened. They are SKIPPED under root rather
+// than relaxed, so the arm that runs is the arm that can fail: each one still asserts
+// the read genuinely failed (it demands a throw before grading the message), so as a
+// non-root user it cannot pass vacuously either.
+const IS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0
+
 function scratch(): string {
   return mkdtempSync(join(tmpdir(), 'dive3962-access-'))
 }
@@ -60,7 +70,7 @@ describe.each(CHANNELS)('%s access-core load taxonomy', channel => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test('UNREADABLE file THROWS and is left on disk — never an empty allowlist', () => {
+  test.skipIf(IS_ROOT)('UNREADABLE file THROWS and is left on disk — never an empty allowlist', () => {
     const dir = scratch()
     const f = join(dir, 'access.json')
     writeFileSync(f, JSON.stringify({ allowFrom: ['1234567890'] }))
@@ -95,7 +105,7 @@ describe.each(CHANNELS)('%s access-core load taxonomy', channel => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test('the throw names the file and the errno so an operator can act', () => {
+  test.skipIf(IS_ROOT)('the throw names the file and the errno so an operator can act', () => {
     const dir = scratch()
     const f = join(dir, 'access.json')
     writeFileSync(f, '{}')
