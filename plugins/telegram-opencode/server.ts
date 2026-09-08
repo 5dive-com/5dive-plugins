@@ -28,6 +28,7 @@ import { TNA_RE, resolveTnaAnswer, OPT_RE, optionChoices, parseOptions, tapEvide
 // DIVE-2846: aliased so the durable tap-failure record needs no surgery on
 // (or collision with) whatever each plugin already imports from 'fs'.
 import { appendFileSync as tapAppendFileSync, mkdirSync as tapMkdirSync, statSync as tapStatSync, renameSync as tapRenameSync } from 'fs'
+import { readAccessFile as readAccessFileCore } from './access-core.ts'
 import { summarizeNeeds, reconcileBanner, type BannerState, type NeedSummary } from './banner'
 import {
   readFileSync, writeFileSync, mkdirSync, chmodSync, statSync,
@@ -170,22 +171,31 @@ type AccessJson = {
 
 const DEFAULT_ACCESS: AccessJson = { allowFrom: [], groups: {}, pending: {} }
 
-function loadAccess(): AccessJson {
-  try {
-    const parsed = JSON.parse(readFileSync(ACCESS_FILE, 'utf8')) as Partial<AccessJson>
-    return {
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      ackReaction: typeof parsed.ackReaction === 'string' ? parsed.ackReaction : undefined,
-      textChunkLimit: typeof parsed.textChunkLimit === 'number'
-        ? Math.max(500, Math.min(4096, parsed.textChunkLimit)) : undefined,
-      dmPolicy: parsed.dmPolicy === 'static' ? 'static'
-        : parsed.dmPolicy === 'pairing' ? 'pairing' : 'allowlist',
-      pending: parsed.pending ?? {},
-    }
-  } catch {
-    return { ...DEFAULT_ACCESS, pending: {} }
+// Field defaulting only. The failure taxonomy (ENOENT vs unreadable vs corrupt)
+// lives in access-core so every channel plugin answers a failed read the same
+// way; the old `catch { return DEFAULT_ACCESS }` here silently denied EVERY chat
+// whenever access.json was momentarily unreadable (DIVE-3962).
+function normalizeAccess(raw: unknown): AccessJson {
+  const parsed = (raw ?? {}) as Partial<AccessJson>
+  return {
+    allowFrom: parsed.allowFrom ?? [],
+    groups: parsed.groups ?? {},
+    ackReaction: typeof parsed.ackReaction === 'string' ? parsed.ackReaction : undefined,
+    textChunkLimit: typeof parsed.textChunkLimit === 'number'
+      ? Math.max(500, Math.min(4096, parsed.textChunkLimit)) : undefined,
+    dmPolicy: parsed.dmPolicy === 'static' ? 'static'
+      : parsed.dmPolicy === 'pairing' ? 'pairing' : 'allowlist',
+    pending: parsed.pending ?? {},
   }
+}
+
+function loadAccess(): AccessJson {
+  return readAccessFileCore({
+    accessFile: ACCESS_FILE,
+    label: 'telegram-opencode',
+    normalize: normalizeAccess,
+    fallback: () => ({ ...DEFAULT_ACCESS, pending: {} }),
+  })
 }
 
 function saveAccess(a: AccessJson): void {

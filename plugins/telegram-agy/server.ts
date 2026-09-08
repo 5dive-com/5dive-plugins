@@ -28,6 +28,7 @@ import {
   readFileSync, writeFileSync, mkdirSync, chmodSync, statSync,
   realpathSync, renameSync, existsSync, unlinkSync, readdirSync, watch,
 } from 'fs'
+import { readAccessFile as readAccessFileCore } from './access-core.ts'
 import { randomBytes } from 'crypto'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
@@ -201,25 +202,33 @@ type AccessJson = {
 
 const DEFAULT_ACCESS: AccessJson = { allowFrom: [], groups: {}, pending: {} }
 
-function loadAccess(): AccessJson {
-  try {
-    const raw = readFileSync(ACCESS_FILE, 'utf8')
-    const parsed = JSON.parse(raw) as Partial<AccessJson>
-    return {
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      ackReaction: typeof parsed.ackReaction === 'string' ? parsed.ackReaction : undefined,
-      textChunkLimit: typeof parsed.textChunkLimit === 'number'
-        ? Math.max(500, Math.min(4096, parsed.textChunkLimit))
-        : undefined,
-      dmPolicy: parsed.dmPolicy === 'static' ? 'static'
-        : parsed.dmPolicy === 'pairing' ? 'pairing'
-        : 'allowlist',
-      pending: parsed.pending ?? {},
-    }
-  } catch {
-    return { ...DEFAULT_ACCESS, pending: {} }
+// Field defaulting only. The failure taxonomy (ENOENT vs unreadable vs corrupt)
+// lives in access-core so every channel plugin answers a failed read the same
+// way; the old `catch { return DEFAULT_ACCESS }` here silently denied EVERY chat
+// whenever access.json was momentarily unreadable (DIVE-3962).
+function normalizeAccess(raw: unknown): AccessJson {
+  const parsed = (raw ?? {}) as Partial<AccessJson>
+  return {
+    allowFrom: parsed.allowFrom ?? [],
+    groups: parsed.groups ?? {},
+    ackReaction: typeof parsed.ackReaction === 'string' ? parsed.ackReaction : undefined,
+    textChunkLimit: typeof parsed.textChunkLimit === 'number'
+      ? Math.max(500, Math.min(4096, parsed.textChunkLimit))
+      : undefined,
+    dmPolicy: parsed.dmPolicy === 'static' ? 'static'
+      : parsed.dmPolicy === 'pairing' ? 'pairing'
+      : 'allowlist',
+    pending: parsed.pending ?? {},
   }
+}
+
+function loadAccess(): AccessJson {
+  return readAccessFileCore({
+    accessFile: ACCESS_FILE,
+    label: 'telegram-agy',
+    normalize: normalizeAccess,
+    fallback: () => ({ ...DEFAULT_ACCESS, pending: {} }),
+  })
 }
 
 // Persist access.json atomically. Used by the pairing flow to record/clear
