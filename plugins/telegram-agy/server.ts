@@ -2667,9 +2667,22 @@ const STALL_ESCALATE_AFTER = Math.max(1, Math.min(20,
   Number(process.env.TELEGRAM_STALL_ESCALATE_AFTER ?? 3)))
 const LAST_STALL_ALERT_FILE = join(STATE_DIR, 'last-stall-alert.stamp')
 // One alert per stall episode. Set when we alert, cleared when the loop
-// recovers (a waiter re-parks). Persisted to a stamp so a server bounce
-// mid-stall doesn't re-ping.
-let stallAlerted = existsSync(LAST_STALL_ALERT_FILE)
+// recovers (a waiter re-parks).
+//
+// DIVE-4077: THIS FLAG GATES DELIVERY, so it must never be inherited from disk.
+// It used to initialize from the stamp, and that made a stall PERMANENT. While
+// it is set, every inbound is answered with the canned refusal and is NOT
+// queued; the empty queue makes the re-arm watchdog return at its
+// `inboxQueue.length === 0` guard before it can reach clearStallAlert(); and the
+// stamp then reloaded the flag on the next boot. So a restart — the owner's last
+// recourse — put a healthy agent straight back into refusing every message, with
+// /status still answering green. A new process has observed nothing, so it now
+// starts out believing nothing.
+let stallAlerted = false
+// Ping dedup ACROSS a bounce, which is all the stamp was ever for: a server
+// restarted mid-stall must not re-ping the owner. Deliberately separate from the
+// delivery gate above, so dedup can survive a restart while the refusal cannot.
+let stallPinged = existsSync(LAST_STALL_ALERT_FILE)
 // The pane as it looked when we alerted. Written next to the stamp so the NEXT
 // occurrence is diagnosable from the box itself instead of from a forwarded
 // screenshot (DIVE-3786: the customer report we had was a photo of a chat).
@@ -2746,7 +2759,7 @@ function detectStallCauseCached(): { cause: string; detail: string } {
 // Send one stall alert to every owner (allowFrom) DM. Plain text — no markdown,
 // so a banner containing special characters can't break the message.
 function sendStallAlert(): void {
-  if (stallAlerted) return
+  if (stallAlerted || stallPinged) return
   const name = agentName()
   const { cause, detail } = detectStallCause()
   const text = `⚠️ ${name} stopped responding — ${cause}.\n${detail}.\n\n`
@@ -2761,6 +2774,7 @@ function sendStallAlert(): void {
       process.stderr.write(`telegram-agy: stall alert to ${id} failed: ${err?.message}\n`))
   }
   stallAlerted = true
+  stallPinged = true
   try { writeFileSync(LAST_STALL_ALERT_FILE, String(Date.now())) } catch {}
   // Keep the evidence on the box. Without this the only record of what the
   // agent was sitting on is whatever the owner happens to screenshot.
@@ -2774,8 +2788,9 @@ function sendStallAlert(): void {
 // Loop recovered — drop the dedup flag so a future stall alerts again.
 function clearStallAlert(): void {
   rearmSubmitFailed = false
-  if (!stallAlerted) return
+  if (!stallAlerted && !stallPinged) return
   stallAlerted = false
+  stallPinged = false
   try { if (existsSync(LAST_STALL_ALERT_FILE)) unlinkSync(LAST_STALL_ALERT_FILE) } catch {}
 }
 
