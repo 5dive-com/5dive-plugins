@@ -22,6 +22,7 @@ import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'gramm
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
+import { readAccessFile as readAccessFileCore } from './access-core.ts'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { COMMAND_REGISTRY, renderHelpBody, botFatherCommands, MODEL_ALIASES, applyModelAliases, EFFORT_LEVELS } from './commands'
@@ -360,49 +361,35 @@ function assertSendable(f: string): void {
   }
 }
 
-function readAccessFile(): Access {
-  try {
-    const raw = readFileSync(ACCESS_FILE, 'utf8')
-    const parsed = JSON.parse(raw) as Partial<Access>
-    return {
-      dmPolicy: parsed.dmPolicy ?? 'pairing',
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      pending: parsed.pending ?? {},
-      discovered: parsed.discovered,
-      mentionPatterns: parsed.mentionPatterns,
-      ackReaction: parsed.ackReaction,
-      replyToMode: parsed.replyToMode,
-      textChunkLimit: parsed.textChunkLimit,
-      chunkMode: parsed.chunkMode,
-      botToBot: parsed.botToBot,
-    }
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === 'ENOENT') return defaultAccess()
-    // A filesystem READ error (EACCES/EBUSY/EISDIR/etc.) is NOT corruption — the
-    // file may be perfectly valid but momentarily unreadable (wrong ownership
-    // after a root edit, a mid-write rename race, a transient IO hiccup). The old
-    // code treated every non-ENOENT error as corrupt JSON: it moved the file
-    // aside (DESTROYING a valid allowlist) and fell back to empty access, which
-    // silently denies EVERY chat ("not allowlisted"). That's data loss + a
-    // misleading failure. So on an fs read error, preserve the file and surface
-    // it loudly instead of empty-denying. (DIVE-159: a `sudo` root edit of
-    // access.json caused exactly this — EACCES → wiped allowlist → dead sends.)
-    if (code) {
-      throw new Error(
-        `telegram channel: cannot read ${ACCESS_FILE} (${code}) — check ownership/permissions. ` +
-          `Refusing to fall back to empty access (would deny all). File left untouched.`,
-      )
-    }
-    // No fs error code ⇒ JSON.parse threw ⇒ the file really is corrupt. Only now
-    // is it safe to move it aside and start fresh.
-    try {
-      renameSync(ACCESS_FILE, `${ACCESS_FILE}.corrupt-${Date.now()}`)
-    } catch {}
-    process.stderr.write(`telegram channel: access.json is corrupt, moved aside. Starting fresh.\n`)
-    return defaultAccess()
+// Field defaulting only. The failure taxonomy this loader established
+// (DIVE-159: ENOENT → defaults · any fs error code → throw, NEVER empty access ·
+// no code ⇒ corrupt JSON → move aside) now lives in access-core.ts so the
+// telegram-{codex,grok,agy} forks answer a failed read identically (DIVE-3962).
+// The operator-facing strings are unchanged.
+function normalizeAccess(raw: unknown): Access {
+  const parsed = (raw ?? {}) as Partial<Access>
+  return {
+    dmPolicy: parsed.dmPolicy ?? 'pairing',
+    allowFrom: parsed.allowFrom ?? [],
+    groups: parsed.groups ?? {},
+    pending: parsed.pending ?? {},
+    discovered: parsed.discovered,
+    mentionPatterns: parsed.mentionPatterns,
+    ackReaction: parsed.ackReaction,
+    replyToMode: parsed.replyToMode,
+    textChunkLimit: parsed.textChunkLimit,
+    chunkMode: parsed.chunkMode,
+    botToBot: parsed.botToBot,
   }
+}
+
+function readAccessFile(): Access {
+  return readAccessFileCore({
+    accessFile: ACCESS_FILE,
+    label: 'telegram channel',
+    normalize: normalizeAccess,
+    fallback: defaultAccess,
+  })
 }
 
 // In static mode, access is snapshotted at boot and never re-read or written.
